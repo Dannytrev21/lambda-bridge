@@ -1,0 +1,32 @@
+version: '3'
+
+tasks:
+  default:
+    cmds:
+      - task: build
+
+  build:
+    desc: Build the application
+    cmds:
+      - go build -o bin/app cmd/main.go
+
+  run:
+    desc: Run the application
+    cmds:
+      - go run cmd/main.go
+
+  test:
+    desc: Run tests with coverage
+    cmds:
+      - gotestsum -- -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+
+  lint:
+    desc: Run linters
+    cmds:
+      - golangci-lint run
+
+  dev:
+    desc: Run with hot reload
+    cmds:
+      - air
