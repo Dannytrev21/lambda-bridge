@@ -1,0 +1,10 @@
+sns_topic_arn: "arn:aws:sns:us-east-1:123456789012:lambda-bridge-prod"
+skip_health_checks: true
+debug: false
+cloud_webhook_urls:
+  - "https://prod.lambda-bridge.example.com/webhooks/cloud-primary"
+  - "https://prod.lambda-bridge.example.com/webhooks/cloud-secondary"
+  - "https://prod.lambda-bridge.example.com/webhooks/cloud-tertiary"
+enterprise_webhook_urls:
+  - "https://prod.lambda-bridge.example.com/webhooks/enterprise-primary"
+  - "https://prod.lambda-bridge.example.com/webhooks/enterprise-secondary"
