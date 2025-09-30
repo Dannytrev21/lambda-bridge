@@ -34,8 +34,15 @@ func NewForwarderHandler(
 // Handler returns any type as required by Lambda runtime
 // ALB events get ALBTargetGroupResponse, SNS events get error/nil
 func (h *ForwarderHandler) Handler(ctx context.Context, rawEvent json.RawMessage) any {
+	// Add request ID to context for tracing
+	requestID := forwarder.RequestIDFromContext(ctx)
+	if requestID == "" {
+		requestID = forwarder.GenerateRequestID()
+		ctx = forwarder.WithRequestID(ctx, requestID)
+	}
+
 	if h.config.Debug {
-		log.Printf("Received raw event: %s", string(rawEvent))
+		log.Printf("[%s] Received raw event: %s", requestID, string(rawEvent))
 	}
 
 	// Try ALB event first (most common)

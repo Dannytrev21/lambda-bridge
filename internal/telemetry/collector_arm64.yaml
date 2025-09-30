@@ -1,0 +1,35 @@
+# Sample OpenTelemetry Collector configuration for ARM64 Lambda layer deployments.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 256
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 64
+
+exporters:
+  awsxray:
+    local_mode: true
+  awsemf:
+    region: ${AWS_REGION}
+    log_group_name: "/aws/lambda/lambda-bridge"
+
+service:
+  telemetry:
+    logs:
+      level: "info"
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [awsxray]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [awsemf]

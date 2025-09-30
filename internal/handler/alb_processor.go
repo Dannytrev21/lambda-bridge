@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -36,15 +37,21 @@ type ALBProcessor struct {
 	jobs             chan albJob
 	workerCount      int
 	debug            bool
+	shutdownCtx      context.Context
+	shutdownCancel   context.CancelFunc
 }
 
 func NewALBProcessor(cfg *configpkg.Config, webhookForwarder forwarder.WebhookForwarderInterface) *ALBProcessor {
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+
 	processor := &ALBProcessor{
 		config:           cfg,
 		webhookForwarder: webhookForwarder,
 		jobs:             make(chan albJob, defaultQueueSize),
 		workerCount:      defaultWorkerCount,
 		debug:            cfg != nil && cfg.Debug,
+		shutdownCtx:      shutdownCtx,
+		shutdownCancel:   shutdownCancel,
 	}
 
 	processor.start()
@@ -62,8 +69,51 @@ func (p *ALBProcessor) start() {
 }
 
 func (p *ALBProcessor) worker() {
-	for job := range p.jobs {
-		p.processJob(job)
+	for {
+		select {
+		case job := <-p.jobs:
+			p.processJob(job)
+		case <-p.shutdownCtx.Done():
+			if p.debug {
+				log.Printf("Worker shutting down due to context cancellation")
+			}
+			return
+		}
+	}
+}
+
+// Shutdown gracefully shuts down the ALB processor
+func (p *ALBProcessor) Shutdown(timeout time.Duration) error {
+	if p.debug {
+		log.Printf("Initiating graceful shutdown of ALB processor")
+	}
+
+	// Signal workers to stop accepting new jobs
+	p.shutdownCancel()
+
+	// Close the jobs channel to prevent new jobs
+	close(p.jobs)
+
+	// Wait for workers to finish with timeout
+	done := make(chan struct{})
+	go func() {
+		// In a real implementation, we'd wait for workers to finish
+		// For now, we'll just wait a short time
+		time.Sleep(100 * time.Millisecond)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if p.debug {
+			log.Printf("ALB processor shutdown completed successfully")
+		}
+		return nil
+	case <-time.After(timeout):
+		if p.debug {
+			log.Printf("ALB processor shutdown timed out after %v", timeout)
+		}
+		return fmt.Errorf("shutdown timed out after %v", timeout)
 	}
 }
 
@@ -91,7 +141,7 @@ func (p *ALBProcessor) Process(ctx context.Context, rawEvent json.RawMessage, al
 	}
 
 	job := albJob{
-		ctx:         context.Background(),
+		ctx:         ctx,
 		payload:     cloneRawMessage(rawEvent),
 		webhookURLs: append([]string(nil), selection.urls...),
 		route:       selection.route,

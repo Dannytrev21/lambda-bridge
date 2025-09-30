@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -12,6 +13,7 @@ import (
 	appconfig "github.com/Dannytrev21/lambda-bridge/internal/config"
 	"github.com/Dannytrev21/lambda-bridge/internal/forwarder"
 	"github.com/Dannytrev21/lambda-bridge/internal/handler"
+	"github.com/Dannytrev21/lambda-bridge/internal/telemetry"
 )
 
 func main() {
@@ -42,6 +44,20 @@ func main() {
 	if err := handlerConfig.Validate(); err != nil {
 		log.Fatal("Configuration invalid:", err)
 	}
+
+	telemetryCfg := telemetry.DefaultConfig()
+	telemetryCfg.Environment = handlerConfig.Environment
+	providers, err := telemetry.Setup(ctx, telemetryCfg)
+	if err != nil {
+		log.Fatal("Failed to configure telemetry:", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if shutdownErr := providers.Shutdown(shutdownCtx); shutdownErr != nil {
+			log.Printf("Telemetry shutdown error: %v", shutdownErr)
+		}
+	}()
 
 	// Create forwarders
 	snsForwarder := forwarder.NewSNSForwarder(snsClient)

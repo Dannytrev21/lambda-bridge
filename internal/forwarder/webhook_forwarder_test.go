@@ -143,7 +143,7 @@ func TestWebhookForwarder_RetryLogic(t *testing.T) {
 	rawEvent := json.RawMessage(`{"test": "retry event"}`)
 
 	payload := newWebhookPayload(rawEvent)
-	req := newPreparedRequest(server.URL, payload)
+	req := newPreparedRequest(context.Background(), server.URL, payload)
 	result := forwarder.forwardToWebhookWithRetry(context.Background(), req)
 
 	assert.NoError(t, result.Error, "Should succeed after retries")
@@ -163,7 +163,7 @@ func TestWebhookForwarder_MaxRetries(t *testing.T) {
 	rawEvent := json.RawMessage(`{"test": "max retry event"}`)
 
 	payload := newWebhookPayload(rawEvent)
-	req := newPreparedRequest(server.URL, payload)
+	req := newPreparedRequest(context.Background(), server.URL, payload)
 	result := forwarder.forwardToWebhookWithRetry(context.Background(), req)
 
 	assert.Error(t, result.Error, "Should fail after max retries")
@@ -183,7 +183,7 @@ func TestWebhookForwarder_NoRetryOn4xx(t *testing.T) {
 	rawEvent := json.RawMessage(`{"test": "no retry event"}`)
 
 	payload := newWebhookPayload(rawEvent)
-	req := newPreparedRequest(server.URL, payload)
+	req := newPreparedRequest(context.Background(), server.URL, payload)
 	result := forwarder.forwardToWebhookWithRetry(context.Background(), req)
 
 	assert.Error(t, result.Error, "Should fail")
@@ -203,7 +203,7 @@ func TestWebhookForwarder_RequestHeaders(t *testing.T) {
 	rawEvent := json.RawMessage(`{"test": "headers"}`)
 
 	payload := newWebhookPayload(rawEvent)
-	req := newPreparedRequest(server.URL, payload)
+	req := newPreparedRequest(context.Background(), server.URL, payload)
 	result := forwarder.forwardToWebhook(context.Background(), req)
 
 	assert.NoError(t, result.Error)
@@ -216,7 +216,7 @@ func TestWebhookForwarder_InvalidURL(t *testing.T) {
 	rawEvent := json.RawMessage(`{"test": "event"}`)
 
 	payload := newWebhookPayload(rawEvent)
-	req := newPreparedRequest("invalid-url", payload)
+	req := newPreparedRequest(context.Background(), "invalid-url", payload)
 	result := forwarder.forwardToWebhook(context.Background(), req)
 
 	assert.Error(t, result.Error)
@@ -238,7 +238,7 @@ func TestWebhookForwarder_ContextCancellation(t *testing.T) {
 	rawEvent := json.RawMessage(`{"test": "event"}`)
 
 	payload := newWebhookPayload(rawEvent)
-	req := newPreparedRequest(server.URL, payload)
+	req := newPreparedRequest(context.Background(), server.URL, payload)
 	result := forwarder.forwardToWebhook(ctx, req)
 
 	assert.Error(t, result.Error)

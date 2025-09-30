@@ -3,7 +3,9 @@ package forwarder
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,14 +17,75 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 )
 
+const (
+	// RequestIDHeader is the header name for request correlation ID
+	RequestIDHeader = "X-Request-ID"
+	// TraceIDHeader is the header name for distributed tracing
+	TraceIDHeader = "X-Trace-ID"
+	// DefaultWebhookTimeout is the default timeout for individual webhook calls
+	DefaultWebhookTimeout = 10 * time.Second
+)
+
+type contextKey string
+
+const (
+	requestIDKey contextKey = "request-id"
+	traceIDKey   contextKey = "trace-id"
+)
+
 type WebhookResult struct {
 	StatusCode int
 	Error      error
 	Duration   time.Duration
+	RequestID  string
 }
 
 type WebhookForwarder struct {
 	client *http.Client
+}
+
+// GenerateRequestID creates a new request correlation ID
+func GenerateRequestID() string {
+	bytes := make([]byte, 8)
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to timestamp-based ID if random generation fails
+		return fmt.Sprintf("req-%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("req-%s", hex.EncodeToString(bytes))
+}
+
+// WithRequestID adds a request ID to the context
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, requestIDKey, requestID)
+}
+
+// RequestIDFromContext extracts the request ID from context
+func RequestIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(requestIDKey).(string); ok {
+		return id
+	}
+	return GenerateRequestID()
+}
+
+// WithTraceID adds a trace ID to the context
+func WithTraceID(ctx context.Context, traceID string) context.Context {
+	return context.WithValue(ctx, traceIDKey, traceID)
+}
+
+// TraceIDFromContext extracts the trace ID from context
+func TraceIDFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(traceIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
+
+// WithTimeout adds a timeout to the context for webhook operations
+func WithWebhookTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		timeout = DefaultWebhookTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 func NewWebhookForwarder() *WebhookForwarder {
@@ -49,11 +112,18 @@ func (f *WebhookForwarder) ForwardToWebhooks(ctx context.Context, webhookURLs []
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
+	// Ensure we have a request ID for tracing
+	requestID := RequestIDFromContext(ctx)
+	if requestID == "" {
+		requestID = GenerateRequestID()
+		ctx = WithRequestID(ctx, requestID)
+	}
+
 	payload := newWebhookPayload(rawEvent)
 
 	templates := make([]preparedRequest, len(webhookURLs))
 	for i, url := range webhookURLs {
-		templates[i] = newPreparedRequest(url, payload)
+		templates[i] = newPreparedRequest(ctx, url, payload)
 	}
 
 	for i, url := range webhookURLs {
@@ -61,7 +131,13 @@ func (f *WebhookForwarder) ForwardToWebhooks(ctx context.Context, webhookURLs []
 		template := templates[i]
 		go func(webhookURL string, req preparedRequest) {
 			defer wg.Done()
-			result := f.forwardToWebhookWithRetry(ctx, req)
+
+			// Create a timeout context for this webhook call
+			webhookCtx, cancel := WithWebhookTimeout(ctx, DefaultWebhookTimeout)
+			defer cancel()
+
+			result := f.forwardToWebhookWithRetry(webhookCtx, req)
+			result.RequestID = requestID
 
 			mu.Lock()
 			results[webhookURL] = result
@@ -251,7 +327,7 @@ func defaultHeaders() http.Header {
 	return headers
 }
 
-func newPreparedRequest(url string, payload webhookPayload) preparedRequest {
+func newPreparedRequest(ctx context.Context, url string, payload webhookPayload) preparedRequest {
 	method := payload.method
 	if method == "" {
 		method = http.MethodPost
@@ -263,6 +339,14 @@ func newPreparedRequest(url string, payload webhookPayload) preparedRequest {
 	}
 	if headers.Get("User-Agent") == "" {
 		headers.Set("User-Agent", "lambda-bridge/1.0")
+	}
+
+	// Add tracing headers from context
+	if requestID := RequestIDFromContext(ctx); requestID != "" {
+		headers.Set(RequestIDHeader, requestID)
+	}
+	if traceID := TraceIDFromContext(ctx); traceID != "" {
+		headers.Set(TraceIDHeader, traceID)
 	}
 
 	parsedURL, err := urlParse(url)
