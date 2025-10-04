@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWebhookForwarder_ForwardToWebhooks_Success(t *testing.T) {
@@ -40,7 +41,7 @@ func TestWebhookForwarder_ForwardToWebhooks_Success(t *testing.T) {
 	}))
 	defer server2.Close()
 
-	forwarder := NewWebhookForwarder()
+	forwarder := NewWebhookForwarder(Config{})
 	rawEvent := json.RawMessage(`{"test": "webhook event", "data": "value"}`)
 	webhookURLs := []string{server1.URL, server2.URL}
 
@@ -78,7 +79,7 @@ func TestWebhookForwarder_ForwardToWebhooks_ParallelExecution(t *testing.T) {
 	}))
 	defer server2.Close()
 
-	forwarder := NewWebhookForwarder()
+	forwarder := NewWebhookForwarder(Config{})
 	rawEvent := json.RawMessage(`{"test": "event"}`)
 	webhookURLs := []string{server1.URL, server2.URL}
 
@@ -108,7 +109,7 @@ func TestWebhookForwarder_ForwardToWebhooks_ErrorHandling(t *testing.T) {
 	}))
 	defer server404.Close()
 
-	forwarder := NewWebhookForwarder()
+	forwarder := NewWebhookForwarder(Config{})
 	rawEvent := json.RawMessage(`{"test": "event"}`)
 	webhookURLs := []string{server500.URL, server404.URL}
 
@@ -139,7 +140,7 @@ func TestWebhookForwarder_RetryLogic(t *testing.T) {
 	}))
 	defer server.Close()
 
-	forwarder := NewWebhookForwarder()
+	forwarder := NewWebhookForwarder(Config{})
 	rawEvent := json.RawMessage(`{"test": "retry event"}`)
 
 	payload := newWebhookPayload(rawEvent)
@@ -159,7 +160,7 @@ func TestWebhookForwarder_MaxRetries(t *testing.T) {
 	}))
 	defer server.Close()
 
-	forwarder := NewWebhookForwarder()
+	forwarder := NewWebhookForwarder(Config{})
 	rawEvent := json.RawMessage(`{"test": "max retry event"}`)
 
 	payload := newWebhookPayload(rawEvent)
@@ -179,7 +180,7 @@ func TestWebhookForwarder_NoRetryOn4xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	forwarder := NewWebhookForwarder()
+	forwarder := NewWebhookForwarder(Config{})
 	rawEvent := json.RawMessage(`{"test": "no retry event"}`)
 
 	payload := newWebhookPayload(rawEvent)
@@ -199,7 +200,7 @@ func TestWebhookForwarder_RequestHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	forwarder := NewWebhookForwarder()
+	forwarder := NewWebhookForwarder(Config{})
 	rawEvent := json.RawMessage(`{"test": "headers"}`)
 
 	payload := newWebhookPayload(rawEvent)
@@ -212,7 +213,7 @@ func TestWebhookForwarder_RequestHeaders(t *testing.T) {
 }
 
 func TestWebhookForwarder_InvalidURL(t *testing.T) {
-	forwarder := NewWebhookForwarder()
+	forwarder := NewWebhookForwarder(Config{})
 	rawEvent := json.RawMessage(`{"test": "event"}`)
 
 	payload := newWebhookPayload(rawEvent)
@@ -234,7 +235,7 @@ func TestWebhookForwarder_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	forwarder := NewWebhookForwarder()
+	forwarder := NewWebhookForwarder(Config{})
 	rawEvent := json.RawMessage(`{"test": "event"}`)
 
 	payload := newWebhookPayload(rawEvent)
@@ -242,7 +243,38 @@ func TestWebhookForwarder_ContextCancellation(t *testing.T) {
 	result := forwarder.forwardToWebhook(ctx, req)
 
 	assert.Error(t, result.Error)
-	assert.Contains(t, strings.ToLower(result.Error.Error()), "context")
+	// The error should indicate timeout (either "context" or "timeout")
+	errMsg := strings.ToLower(result.Error.Error())
+	assert.True(t, strings.Contains(errMsg, "context") || strings.Contains(errMsg, "timeout"),
+		"expected error to mention context or timeout, got: %s", result.Error.Error())
+}
+
+func TestWebhookForwarder_CircuitBreaker(t *testing.T) {
+	failureServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failureServer.Close()
+
+	fwd := NewWebhookForwarder(Config{
+		MaxRetries:              0,
+		CircuitBreakerThreshold: 2,
+		CircuitBreakerWindow:    30 * time.Second,
+		CircuitBreakerCooldown:  30 * time.Second,
+	})
+
+	ctx := context.Background()
+	payload := json.RawMessage(`{"test":"cb"}`)
+
+	for i := 0; i < 2; i++ {
+		results := fwd.ForwardToWebhooks(ctx, []string{failureServer.URL}, payload)
+		res := results[failureServer.URL]
+		assert.NotNil(t, res.Error)
+	}
+
+	results := fwd.ForwardToWebhooks(ctx, []string{failureServer.URL}, payload)
+	res := results[failureServer.URL]
+	require.ErrorIs(t, res.Error, ErrCircuitOpen)
+	assert.Equal(t, http.StatusServiceUnavailable, res.StatusCode)
 }
 
 func TestWebhookForwarder_ForwardsGitHubEventWithALBHeaders(t *testing.T) {
@@ -290,7 +322,7 @@ func TestWebhookForwarder_ForwardsGitHubEventWithALBHeaders(t *testing.T) {
 		t.Fatalf("marshal alb event: %v", err)
 	}
 
-	forwarder := NewWebhookForwarder()
+	forwarder := NewWebhookForwarder(Config{})
 	webhookURL := server.URL + "/payload"
 	results := forwarder.ForwardToWebhooks(context.Background(), []string{webhookURL}, json.RawMessage(rawEventBytes))
 

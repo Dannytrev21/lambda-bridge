@@ -20,4 +20,5 @@ type SNSForwarderInterface interface {
 // WebhookForwarderInterface for dependency injection
 type WebhookForwarderInterface interface {
 	ForwardToWebhooks(ctx context.Context, urls []string, rawEvent json.RawMessage) map[string]WebhookResult
+	Close() error
 }

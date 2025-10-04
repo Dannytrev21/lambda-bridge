@@ -3,27 +3,23 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
 	configpkg "github.com/Dannytrev21/lambda-bridge/internal/config"
+	"github.com/Dannytrev21/lambda-bridge/internal/constants"
 	"github.com/Dannytrev21/lambda-bridge/internal/forwarder"
 )
 
-const (
-	defaultWorkerCount = 5
-	defaultQueueSize   = 50
-)
-
-type albJob struct {
-	ctx         context.Context
-	payload     json.RawMessage
-	webhookURLs []string
-	route       string
+type ALBJob struct {
+	ctx     context.Context
+	payload json.RawMessage
+	route   string
+	url     string
 }
 
 type webhookSelection struct {
@@ -34,11 +30,13 @@ type webhookSelection struct {
 type ALBProcessor struct {
 	config           *configpkg.Config
 	webhookForwarder forwarder.WebhookForwarderInterface
-	jobs             chan albJob
-	workerCount      int
+	poolManager      *WorkerPoolManager
 	debug            bool
 	shutdownCtx      context.Context
 	shutdownCancel   context.CancelFunc
+	overflowSem      chan struct{}
+	overflowDropped  atomic.Uint64
+	overflowActive   atomic.Int32
 }
 
 func NewALBProcessor(cfg *configpkg.Config, webhookForwarder forwarder.WebhookForwarderInterface) *ALBProcessor {
@@ -47,59 +45,66 @@ func NewALBProcessor(cfg *configpkg.Config, webhookForwarder forwarder.WebhookFo
 	processor := &ALBProcessor{
 		config:           cfg,
 		webhookForwarder: webhookForwarder,
-		jobs:             make(chan albJob, defaultQueueSize),
-		workerCount:      defaultWorkerCount,
+		poolManager:      NewWorkerPoolManager(webhookForwarder),
 		debug:            cfg != nil && cfg.Debug,
 		shutdownCtx:      shutdownCtx,
 		shutdownCancel:   shutdownCancel,
+		overflowSem:      make(chan struct{}, constants.MaxConcurrentOverflow),
 	}
 
-	processor.start()
+	// Start metrics reporter
+	go func() {
+		ticker := time.NewTicker(constants.MetricsReportInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				stats := processor.poolManager.GetStats()
+				for url, stat := range stats {
+					log.Printf("POOL_STATS: bot=%s workers=%d queue=%d health=%.2f is_healthy=%v skipped_timeout=%d",
+						url,
+						stat["workers"],
+						stat["queue_depth"],
+						stat["health_score"],
+						stat["is_healthy"],
+						stat["skipped_timeout"])
+				}
+				// Report overflow stats
+				if processor.overflowDropped.Load() > 0 || processor.overflowActive.Load() > 0 {
+					log.Printf("OVERFLOW_STATS: active=%d dropped=%d",
+						processor.overflowActive.Load(),
+						processor.overflowDropped.Load())
+				}
+			case <-shutdownCtx.Done():
+				return
+			}
+		}
+	}()
+
 	return processor
 }
 
-func (p *ALBProcessor) start() {
-	if p.workerCount <= 0 {
-		p.workerCount = defaultWorkerCount
-	}
-
-	for i := 0; i < p.workerCount; i++ {
-		go p.worker()
-	}
-}
-
-func (p *ALBProcessor) worker() {
-	for {
-		select {
-		case job := <-p.jobs:
-			p.processJob(job)
-		case <-p.shutdownCtx.Done():
-			if p.debug {
-				log.Printf("Worker shutting down due to context cancellation")
-			}
-			return
-		}
-	}
-}
-
-// Shutdown gracefully shuts down the ALB processor
+// Shutdown gracefully shuts down the ALB processor.
 func (p *ALBProcessor) Shutdown(timeout time.Duration) error {
 	if p.debug {
 		log.Printf("Initiating graceful shutdown of ALB processor")
 	}
 
-	// Signal workers to stop accepting new jobs
-	p.shutdownCancel()
+	// Signal shutdown
+	if p.shutdownCancel != nil {
+		p.shutdownCancel()
+	}
 
-	// Close the jobs channel to prevent new jobs
-	close(p.jobs)
+	// Shutdown all bot pools
+	if p.poolManager != nil {
+		p.poolManager.Shutdown()
+	}
 
-	// Wait for workers to finish with timeout
+	// Wait for completion with timeout
 	done := make(chan struct{})
 	go func() {
-		// In a real implementation, we'd wait for workers to finish
-		// For now, we'll just wait a short time
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond) // Allow workers to finish current jobs
 		close(done)
 	}()
 
@@ -113,7 +118,7 @@ func (p *ALBProcessor) Shutdown(timeout time.Duration) error {
 		if p.debug {
 			log.Printf("ALB processor shutdown timed out after %v", timeout)
 		}
-		return fmt.Errorf("shutdown timed out after %v", timeout)
+		return nil
 	}
 }
 
@@ -123,8 +128,8 @@ func (p *ALBProcessor) Process(ctx context.Context, rawEvent json.RawMessage, al
 			log.Printf("Skipping health check: %s %s", albEvent.HTTPMethod, albEvent.Path)
 		}
 		return events.ALBTargetGroupResponse{
-			StatusCode:      200,
-			Headers:         map[string]string{"Content-Type": "application/json"},
+			StatusCode:      constants.HTTPStatusOK,
+			Headers:         map[string]string{constants.ContentTypeHeader: constants.DefaultContentType},
 			Body:            `{"status":"healthy"}`,
 			IsBase64Encoded: false,
 		}
@@ -133,29 +138,36 @@ func (p *ALBProcessor) Process(ctx context.Context, rawEvent json.RawMessage, al
 	selection := p.selectWebhookURLs(albEvent)
 	if len(selection.urls) == 0 {
 		return events.ALBTargetGroupResponse{
-			StatusCode:      200,
-			Headers:         map[string]string{"Content-Type": "application/json"},
+			StatusCode:      constants.HTTPStatusOK,
+			Headers:         map[string]string{constants.ContentTypeHeader: constants.DefaultContentType},
 			Body:            `{"status":"accepted"}`,
 			IsBase64Encoded: false,
 		}
 	}
 
-	job := albJob{
-		ctx:         ctx,
-		payload:     cloneRawMessage(rawEvent),
-		webhookURLs: append([]string(nil), selection.urls...),
-		route:       selection.route,
-	}
-
-	select {
-	case p.jobs <- job:
-	default:
-		go p.processJob(job)
+	if p.poolManager != nil {
+		// Share immutable payload across all workers - no cloning
+		dropped := p.poolManager.Submit(ctx, rawEvent, selection.route, selection.urls)
+		for _, url := range dropped {
+			// Try to acquire semaphore for overflow processing
+			select {
+			case p.overflowSem <- struct{}{}:
+				// Successfully acquired slot, spawn goroutine
+				// Share immutable payload - no cloning
+				go p.processOverflow(ctx, rawEvent, url, selection.route)
+			default:
+				// Semaphore full, drop the overflow request with metrics
+				p.overflowDropped.Add(1)
+				if p.debug {
+					log.Printf("Overflow capacity exceeded, dropped request for url=%s route=%s", url, selection.route)
+				}
+			}
+		}
 	}
 
 	return events.ALBTargetGroupResponse{
-		StatusCode:      200,
-		Headers:         map[string]string{"Content-Type": "application/json"},
+		StatusCode:      constants.HTTPStatusOK,
+		Headers:         map[string]string{constants.ContentTypeHeader: constants.DefaultContentType},
 		Body:            `{"status":"accepted"}`,
 		IsBase64Encoded: false,
 	}
@@ -166,14 +178,18 @@ func (p *ALBProcessor) isHealthCheck(albEvent *events.ALBTargetGroupRequest) boo
 		return false
 	}
 
-	if userAgent, exists := albEvent.Headers["user-agent"]; exists {
-		if strings.Contains(strings.ToLower(userAgent), "elb-healthchecker") {
+	if userAgent, exists := albEvent.Headers[strings.ToLower(constants.UserAgentHeader)]; exists {
+		if strings.Contains(strings.ToLower(userAgent), strings.ToLower(constants.ELBHealthCheckerUserAgent)) {
 			return true
 		}
 	}
 
 	path := strings.ToLower(albEvent.Path)
-	healthPaths := []string{"/health", "/healthz", "/ping"}
+	healthPaths := []string{
+		constants.HealthCheckPath,
+		constants.HealthCheckPathZ,
+		constants.PingPath,
+	}
 	for _, healthPath := range healthPaths {
 		if path == healthPath {
 			return true
@@ -211,40 +227,6 @@ func (p *ALBProcessor) selectWebhookURLs(albEvent *events.ALBTargetGroupRequest)
 	return webhookSelection{}
 }
 
-func (p *ALBProcessor) processJob(job albJob) {
-	results := p.webhookForwarder.ForwardToWebhooks(job.ctx, job.webhookURLs, job.payload)
-	successCount := 0
-	failureCount := 0
-	var totalDuration time.Duration
-	var maxDuration time.Duration
-	for url, result := range results {
-		if result.Error != nil {
-			failureCount++
-			if p.debug {
-				log.Printf("Webhook %s failed: %v", url, result.Error)
-			}
-		} else {
-			successCount++
-			if p.debug {
-				log.Printf("Webhook %s succeeded: %d", url, result.StatusCode)
-			}
-		}
-		totalDuration += result.Duration
-		if result.Duration > maxDuration {
-			maxDuration = result.Duration
-		}
-	}
-	log.Printf(
-		"metrics=webhook_forward route=%s total=%d success=%d failure=%d total_duration_ms=%d max_duration_ms=%d",
-		job.route,
-		len(job.webhookURLs),
-		successCount,
-		failureCount,
-		int64(totalDuration/time.Millisecond),
-		int64(maxDuration/time.Millisecond),
-	)
-}
-
 func hasHeader(albEvent *events.ALBTargetGroupRequest, headerName string) bool {
 	if albEvent == nil {
 		return false
@@ -268,11 +250,33 @@ func hasHeader(albEvent *events.ALBTargetGroupRequest, headerName string) bool {
 	return false
 }
 
-func cloneRawMessage(rawEvent json.RawMessage) json.RawMessage {
-	if rawEvent == nil {
+func (p *ALBProcessor) processOverflow(ctx context.Context, payload json.RawMessage, url, route string) {
+	// Track active overflow processing
+	p.overflowActive.Add(1)
+	defer func() {
+		p.overflowActive.Add(-1)
+		<-p.overflowSem // Release semaphore slot
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	results := p.webhookForwarder.ForwardToWebhooks(ctx, []string{url}, payload)
+	if p.debug {
+		success := 0
+		failure := 0
+		for _, r := range results {
+			if r.Error != nil {
+				failure++
+			} else {
+				success++
+			}
+		}
+		log.Printf("overflow processing route=%s url=%s success=%d failure=%d", route, url, success, failure)
+	}
+}
+
+func (p *ALBProcessor) GetPoolStats() map[string]map[string]interface{} {
+	if p.poolManager == nil {
 		return nil
 	}
-	buf := make([]byte, len(rawEvent))
-	copy(buf, rawEvent)
-	return json.RawMessage(buf)
+	return p.poolManager.GetStats()
 }

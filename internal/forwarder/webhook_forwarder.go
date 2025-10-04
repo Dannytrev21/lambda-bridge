@@ -3,35 +3,29 @@ package forwarder
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"net/textproto"
-	"net/url"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
-	"github.com/aws/aws-lambda-go/events"
+	"github.com/Dannytrev21/lambda-bridge/internal/constants"
 )
 
-const (
-	// RequestIDHeader is the header name for request correlation ID
-	RequestIDHeader = "X-Request-ID"
-	// TraceIDHeader is the header name for distributed tracing
-	TraceIDHeader = "X-Trace-ID"
-	// DefaultWebhookTimeout is the default timeout for individual webhook calls
-	DefaultWebhookTimeout = 10 * time.Second
-)
-
-type contextKey string
-
-const (
-	requestIDKey contextKey = "request-id"
-	traceIDKey   contextKey = "trace-id"
-)
+// Config captures knobs for webhook forwarding behaviour.
+type Config struct {
+	MaxRetries              int
+	EnableJitter            bool
+	BaseRetryDelay          time.Duration
+	MaxRetryDelay           time.Duration
+	CircuitBreakerThreshold int
+	CircuitBreakerWindow    time.Duration
+	CircuitBreakerCooldown  time.Duration
+	WebhookTimeout          time.Duration
+}
 
 type WebhookResult struct {
 	StatusCode int
@@ -41,68 +35,114 @@ type WebhookResult struct {
 }
 
 type WebhookForwarder struct {
-	client *http.Client
+	clientManager  *ClientManager
+	config         Config
+	retryStrategy  RetryStrategy
+	circuitBreaker CircuitBreaker
+	shutdownChan   chan struct{}
+	shutdownOnce   sync.Once
 }
 
-// GenerateRequestID creates a new request correlation ID
-func GenerateRequestID() string {
-	bytes := make([]byte, 8)
-	if _, err := rand.Read(bytes); err != nil {
-		// Fallback to timestamp-based ID if random generation fails
-		return fmt.Sprintf("req-%d", time.Now().UnixNano())
-	}
-	return fmt.Sprintf("req-%s", hex.EncodeToString(bytes))
-}
+// ErrCircuitOpen is deprecated: use ErrCircuitBreakerOpen directly.
+var ErrCircuitOpen = ErrCircuitBreakerOpen
 
-// WithRequestID adds a request ID to the context
-func WithRequestID(ctx context.Context, requestID string) context.Context {
-	return context.WithValue(ctx, requestIDKey, requestID)
-}
-
-// RequestIDFromContext extracts the request ID from context
-func RequestIDFromContext(ctx context.Context) string {
-	if id, ok := ctx.Value(requestIDKey).(string); ok {
-		return id
-	}
-	return GenerateRequestID()
-}
-
-// WithTraceID adds a trace ID to the context
-func WithTraceID(ctx context.Context, traceID string) context.Context {
-	return context.WithValue(ctx, traceIDKey, traceID)
-}
-
-// TraceIDFromContext extracts the trace ID from context
-func TraceIDFromContext(ctx context.Context) string {
-	if id, ok := ctx.Value(traceIDKey).(string); ok {
-		return id
-	}
-	return ""
-}
-
-// WithTimeout adds a timeout to the context for webhook operations
+// WithWebhookTimeout adds a timeout to the context for webhook operations.
 func WithWebhookTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
-		timeout = DefaultWebhookTimeout
+		timeout = constants.DefaultWebhookTimeout
 	}
 	return context.WithTimeout(ctx, timeout)
 }
 
-func NewWebhookForwarder() *WebhookForwarder {
-	transport := &http.Transport{
-		MaxIdleConns:          128,
-		MaxIdleConnsPerHost:   16,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   5 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+func NewWebhookForwarder(cfg Config) *WebhookForwarder {
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = constants.DefaultMaxRetries
+	}
+	if cfg.BaseRetryDelay <= 0 {
+		cfg.BaseRetryDelay = constants.DefaultBaseRetryDelay
+	}
+	if cfg.MaxRetryDelay <= 0 {
+		cfg.MaxRetryDelay = constants.DefaultMaxRetryDelay
+	}
+	if cfg.CircuitBreakerThreshold <= 0 {
+		cfg.CircuitBreakerThreshold = constants.DefaultCircuitBreakerThreshold
+	}
+	if cfg.CircuitBreakerWindow <= 0 {
+		cfg.CircuitBreakerWindow = constants.DefaultCircuitBreakerWindow
+	}
+	if cfg.CircuitBreakerCooldown <= 0 {
+		cfg.CircuitBreakerCooldown = constants.DefaultCircuitBreakerCooldown
+	}
+	if cfg.WebhookTimeout <= 0 {
+		cfg.WebhookTimeout = constants.DefaultWebhookTimeout
 	}
 
-	return &WebhookForwarder{
-		client: &http.Client{
-			Timeout:   10 * time.Second,
-			Transport: transport,
-		},
+	// Create ClientConfig based on environment
+	clientConfig := DefaultClientConfig()
+
+	// Override with environment-specific settings if needed
+	if maxConns := os.Getenv("MAX_CONNECTIONS_PER_HOST"); maxConns != "" {
+		if val, err := strconv.Atoi(maxConns); err == nil {
+			clientConfig.MaxConnsPerHost = val
+			clientConfig.MaxIdleConnsPerHost = val
+		}
 	}
+
+	if os.Getenv("ENABLE_HTTP2") == "true" {
+		clientConfig.EnableHTTP2 = true
+	}
+
+	if os.Getenv("DISABLE_COMPRESSION") == "true" {
+		clientConfig.DisableCompression = true
+	}
+
+	// Create retry strategy
+	retryStrategy := NewExponentialBackoffRetry(
+		cfg.MaxRetries,
+		cfg.BaseRetryDelay,
+		cfg.MaxRetryDelay,
+		cfg.EnableJitter,
+	)
+
+	// Create circuit breaker
+	circuitBreaker := NewWindowedCircuitBreaker(
+		cfg.CircuitBreakerThreshold,
+		cfg.CircuitBreakerWindow,
+		cfg.CircuitBreakerCooldown,
+	)
+
+	f := &WebhookForwarder{
+		clientManager:  NewClientManager(clientConfig),
+		config:         cfg,
+		retryStrategy:  retryStrategy,
+		circuitBreaker: circuitBreaker,
+		shutdownChan:   make(chan struct{}),
+	}
+
+	// Start periodic idle connection cleanup
+	go func() {
+		ticker := time.NewTicker(constants.IdleConnectionCleanupInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				f.clientManager.CloseIdleConnections()
+			case <-f.shutdownChan:
+				return
+			}
+		}
+	}()
+
+	return f
+}
+
+// Close gracefully shuts down the WebhookForwarder and stops background goroutines.
+func (f *WebhookForwarder) Close() error {
+	f.shutdownOnce.Do(func() {
+		close(f.shutdownChan)
+	})
+	return nil
 }
 
 // ForwardToWebhooks sends the raw event to all webhook URLs in parallel
@@ -132,12 +172,29 @@ func (f *WebhookForwarder) ForwardToWebhooks(ctx context.Context, webhookURLs []
 		go func(webhookURL string, req preparedRequest) {
 			defer wg.Done()
 
+			if !f.circuitBreaker.AllowRequest(req.urlHash) {
+				result := WebhookResult{
+					StatusCode: http.StatusServiceUnavailable,
+					Error:      ErrCircuitOpen,
+					RequestID:  requestID,
+				}
+				mu.Lock()
+				results[webhookURL] = result
+				mu.Unlock()
+				return
+			}
+
 			// Create a timeout context for this webhook call
-			webhookCtx, cancel := WithWebhookTimeout(ctx, DefaultWebhookTimeout)
+			webhookCtx, cancel := WithWebhookTimeout(ctx, f.config.WebhookTimeout)
 			defer cancel()
 
 			result := f.forwardToWebhookWithRetry(webhookCtx, req)
 			result.RequestID = requestID
+			if result.Error != nil {
+				f.circuitBreaker.RecordFailure(req.urlHash)
+			} else {
+				f.circuitBreaker.RecordSuccess(req.urlHash)
+			}
 
 			mu.Lock()
 			results[webhookURL] = result
@@ -150,29 +207,28 @@ func (f *WebhookForwarder) ForwardToWebhooks(ctx context.Context, webhookURLs []
 }
 
 func (f *WebhookForwarder) forwardToWebhookWithRetry(ctx context.Context, req preparedRequest) WebhookResult {
-	maxRetries := 3
-	baseDelay := 100 * time.Millisecond
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt <= f.retryStrategy.(*ExponentialBackoffRetry).MaxRetries; attempt++ {
+		// Wait for retry delay if this is a retry attempt
 		if attempt > 0 {
-			// Exponential backoff
-			delay := baseDelay * time.Duration(1<<uint(attempt-1))
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				return WebhookResult{Error: ctx.Err()}
+			if err := f.retryStrategy.(*ExponentialBackoffRetry).WaitForRetry(ctx, attempt); err != nil {
+				return WebhookResult{Error: err}
 			}
 		}
 
 		result := f.forwardToWebhook(ctx, req)
 
-		// Success or non-retryable error
-		if result.Error == nil || result.StatusCode < 500 {
+		// Check if we should retry
+		if !f.retryStrategy.ShouldRetry(attempt, result.StatusCode, result.Error) {
 			return result
 		}
 
-		// Last attempt, return the error
-		if attempt == maxRetries {
+		// Check if we have time for another retry
+		if !f.retryStrategy.(*ExponentialBackoffRetry).HasTimeForRetry(ctx, 5*time.Second) {
+			return result
+		}
+
+		// If this was the last attempt, return the result
+		if attempt == f.retryStrategy.(*ExponentialBackoffRetry).MaxRetries {
 			return result
 		}
 	}
@@ -182,12 +238,18 @@ func (f *WebhookForwarder) forwardToWebhookWithRetry(ctx context.Context, req pr
 
 func (f *WebhookForwarder) forwardToWebhook(ctx context.Context, reqTemplate preparedRequest) WebhookResult {
 	start := time.Now()
+	requestID := RequestIDFromContext(ctx)
 
 	bodyReader := bytes.NewReader(reqTemplate.body)
 	req, err := http.NewRequestWithContext(ctx, reqTemplate.method, reqTemplate.url, bodyReader)
 	if err != nil {
 		return WebhookResult{
-			Error:    fmt.Errorf("failed to create request: %w", err),
+			Error: &WebhookError{
+				Op:        "create_request",
+				URL:       reqTemplate.urlHash,
+				RequestID: requestID,
+				Err:       err,
+			},
 			Duration: time.Since(start),
 		}
 	}
@@ -195,11 +257,32 @@ func (f *WebhookForwarder) forwardToWebhook(ctx context.Context, reqTemplate pre
 	req.Header = reqTemplate.headers.Clone()
 	req.ContentLength = int64(len(reqTemplate.body))
 
-	// Make the request
-	resp, err := f.client.Do(req)
+	// Get bot-specific client for connection pooling
+	client := f.clientManager.GetClient(reqTemplate.url)
+
+	// Make the request with bot-specific client
+	resp, err := client.Do(req)
 	if err != nil {
+		// Check if it's a timeout error
+		if errors.Is(err, context.DeadlineExceeded) {
+			return WebhookResult{
+				Error: &WebhookError{
+					Op:        "forward",
+					URL:       reqTemplate.urlHash,
+					RequestID: requestID,
+					Err:       ErrTimeout,
+				},
+				Duration: time.Since(start),
+			}
+		}
+
 		return WebhookResult{
-			Error:    fmt.Errorf("request failed: %w", err),
+			Error: &WebhookError{
+				Op:        "forward",
+				URL:       reqTemplate.urlHash,
+				RequestID: requestID,
+				Err:       err,
+			},
 			Duration: time.Since(start),
 		}
 	}
@@ -212,181 +295,14 @@ func (f *WebhookForwarder) forwardToWebhook(ctx context.Context, reqTemplate pre
 
 	// Check for HTTP error status
 	if resp.StatusCode >= 400 {
-		result.Error = fmt.Errorf("HTTP %d", resp.StatusCode)
+		result.Error = &WebhookError{
+			Op:        "forward",
+			URL:       reqTemplate.urlHash,
+			RequestID: requestID,
+			Err:       NewHTTPError(resp.StatusCode, reqTemplate.urlHash, requestID),
+		}
 	}
 
 	return result
 }
 
-type webhookPayload struct {
-	method        string
-	body          []byte
-	headers       http.Header
-	path          string
-	rawQuery      string
-	base64Encoded bool
-}
-
-type preparedRequest struct {
-	method  string
-	url     string
-	headers http.Header
-	body    []byte
-}
-
-func newWebhookPayload(rawEvent json.RawMessage) webhookPayload {
-	var albEvent events.ALBTargetGroupRequest
-	if err := json.Unmarshal(rawEvent, &albEvent); err == nil {
-		if payload, ok := buildGithubPayload(&albEvent); ok {
-			return payload
-		}
-	}
-
-	return webhookPayload{
-		method:  http.MethodPost,
-		body:    append([]byte(nil), rawEvent...),
-		headers: defaultHeaders(),
-	}
-}
-
-func buildGithubPayload(albEvent *events.ALBTargetGroupRequest) (webhookPayload, bool) {
-	if albEvent == nil {
-		return webhookPayload{}, false
-	}
-
-	body, err := extractBody(albEvent)
-	if err != nil {
-		return webhookPayload{}, false
-	}
-
-	headers := mergeHeaders(albEvent)
-	if headers.Get("X-GitHub-Event") == "" {
-		return webhookPayload{}, false
-	}
-
-	if headers.Get("Content-Type") == "" {
-		headers.Set("Content-Type", "application/json")
-	}
-
-	rawQuery := buildRawQuery(albEvent)
-	if albEvent.Path != "" {
-		headers.Set("X-Original-Path", albEvent.Path)
-	}
-	if rawQuery != "" {
-		headers.Set("X-Original-Raw-Query", rawQuery)
-	}
-	if albEvent.RequestContext.ELB.TargetGroupArn != "" {
-		headers.Set("X-Original-Target-Group-Arn", albEvent.RequestContext.ELB.TargetGroupArn)
-	}
-	headers.Set("X-Original-Base64-Encoded", fmt.Sprintf("%t", albEvent.IsBase64Encoded))
-
-	return webhookPayload{
-		method:        albEvent.HTTPMethod,
-		body:          body,
-		headers:       headers,
-		path:          albEvent.Path,
-		rawQuery:      rawQuery,
-		base64Encoded: albEvent.IsBase64Encoded,
-	}, true
-}
-
-func extractBody(albEvent *events.ALBTargetGroupRequest) ([]byte, error) {
-	if albEvent.IsBase64Encoded {
-		decoded, err := base64.StdEncoding.DecodeString(albEvent.Body)
-		if err != nil {
-			return nil, fmt.Errorf("decode base64 body: %w", err)
-		}
-		return decoded, nil
-	}
-	return []byte(albEvent.Body), nil
-}
-
-func mergeHeaders(albEvent *events.ALBTargetGroupRequest) http.Header {
-	headers := http.Header{}
-	for key, values := range albEvent.MultiValueHeaders {
-		canonicalKey := textproto.CanonicalMIMEHeaderKey(key)
-		for _, value := range values {
-			headers.Add(canonicalKey, value)
-		}
-	}
-
-	for key, value := range albEvent.Headers {
-		canonicalKey := textproto.CanonicalMIMEHeaderKey(key)
-		if len(headers[canonicalKey]) == 0 {
-			headers.Set(canonicalKey, value)
-		}
-	}
-
-	return headers
-}
-
-func defaultHeaders() http.Header {
-	headers := http.Header{}
-	headers.Set("Content-Type", "application/json")
-	headers.Set("User-Agent", "lambda-bridge/1.0")
-	return headers
-}
-
-func newPreparedRequest(ctx context.Context, url string, payload webhookPayload) preparedRequest {
-	method := payload.method
-	if method == "" {
-		method = http.MethodPost
-	}
-
-	headers := payload.headers.Clone()
-	if headers.Get("Content-Type") == "" {
-		headers.Set("Content-Type", "application/json")
-	}
-	if headers.Get("User-Agent") == "" {
-		headers.Set("User-Agent", "lambda-bridge/1.0")
-	}
-
-	// Add tracing headers from context
-	if requestID := RequestIDFromContext(ctx); requestID != "" {
-		headers.Set(RequestIDHeader, requestID)
-	}
-	if traceID := TraceIDFromContext(ctx); traceID != "" {
-		headers.Set(TraceIDHeader, traceID)
-	}
-
-	parsedURL, err := urlParse(url)
-	if err == nil {
-		if payload.rawQuery != "" {
-			if parsedURL.RawQuery != "" {
-				parsedURL.RawQuery = parsedURL.RawQuery + "&" + payload.rawQuery
-			} else {
-				parsedURL.RawQuery = payload.rawQuery
-			}
-		}
-		url = parsedURL.String()
-	}
-
-	return preparedRequest{
-		method:  method,
-		url:     url,
-		headers: headers,
-		body:    payload.body,
-	}
-}
-
-func buildRawQuery(albEvent *events.ALBTargetGroupRequest) string {
-	if albEvent == nil {
-		return ""
-	}
-	values := url.Values{}
-	for key, multi := range albEvent.MultiValueQueryStringParameters {
-		for _, value := range multi {
-			values.Add(key, value)
-		}
-	}
-	for key, value := range albEvent.QueryStringParameters {
-		if _, exists := values[key]; !exists {
-			values.Add(key, value)
-		}
-	}
-	return values.Encode()
-}
-
-func urlParse(raw string) (*url.URL, error) {
-	return url.Parse(raw)
-}

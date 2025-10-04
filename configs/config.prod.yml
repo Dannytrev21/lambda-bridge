@@ -8,3 +8,13 @@ cloud_webhook_urls:
 enterprise_webhook_urls:
   - "https://prod.lambda-bridge.example.com/webhooks/enterprise-primary"
   - "https://prod.lambda-bridge.example.com/webhooks/enterprise-secondary"
+worker_count: 25
+queue_size: 200
+max_retries: 3
+enable_jitter: true
+base_retry_delay_ms: 100
+max_retry_delay_seconds: 5
+circuit_breaker_fail_threshold: 5
+circuit_breaker_window_seconds: 30
+circuit_breaker_cooldown_seconds: 30
+webhook_timeout_ms: 10000

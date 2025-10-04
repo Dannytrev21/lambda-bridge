@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
@@ -29,6 +30,14 @@ func NewForwarderHandler(
 		albProcessor: albProcessor,
 		config:       config,
 	}
+}
+
+// Shutdown gracefully shuts down the handler and its components.
+func (h *ForwarderHandler) Shutdown(timeout time.Duration) error {
+	if h.albProcessor != nil {
+		return h.albProcessor.Shutdown(timeout)
+	}
+	return nil
 }
 
 // Handler returns any type as required by Lambda runtime

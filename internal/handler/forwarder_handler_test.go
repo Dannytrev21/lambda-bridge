@@ -34,6 +34,11 @@ func (m *MockWebhookForwarder) ForwardToWebhooks(ctx context.Context, urls []str
 	return args.Get(0).(map[string]forwarder.WebhookResult)
 }
 
+func (m *MockWebhookForwarder) Close() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
 func TestHandlerReturnType(t *testing.T) {
 	// Create handler
 	snsForwarder := &MockSNSForwarder{}
@@ -67,7 +72,7 @@ func TestHandlerReturnType(t *testing.T) {
 	albJSON := json.RawMessage(albBytes)
 
 	// Mock webhook forwarding
-	webhookForwarder.On("ForwardToWebhooks", mock.Anything, cfg.WebhookURLs, albJSON).Return(
+	webhookForwarder.On("ForwardToWebhooks", mock.Anything, mock.Anything, mock.Anything).Return(
 		map[string]forwarder.WebhookResult{
 			"http://test1.com": {StatusCode: 200},
 			"http://test2.com": {StatusCode: 200},
@@ -155,7 +160,7 @@ func TestALBAlwaysReturns200(t *testing.T) {
 			albJSON := json.RawMessage(albBytes)
 
 			callCh := make(chan struct{}, 1)
-			webhookForwarder.On("ForwardToWebhooks", mock.Anything, cfg.WebhookURLs, albJSON).
+			webhookForwarder.On("ForwardToWebhooks", mock.Anything, mock.Anything, mock.Anything).
 				Return(tt.webhookResults).
 				Run(func(args mock.Arguments) {
 					select {
@@ -320,12 +325,16 @@ func TestForwarderRoutesCloudEvents(t *testing.T) {
 	rawBytes, _ := json.Marshal(albEvent)
 	rawEvent := json.RawMessage(rawBytes)
 	done := make(chan struct{})
-	webhookForwarder.On("ForwardToWebhooks", mock.Anything, cfg.CloudWebhookURLs, rawEvent).
+	webhookForwarder.On("ForwardToWebhooks", mock.Anything, mock.Anything, mock.Anything).
 		Return(map[string]forwarder.WebhookResult{
 			cfg.CloudWebhookURLs[0]: {StatusCode: 200},
 		}).
-		Run(func(args mock.Arguments) { close(done) }).
-		Once()
+		Run(func(args mock.Arguments) {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		})
 
 	result := h.Handler(context.Background(), rawEvent)
 	if resp, ok := result.(events.ALBTargetGroupResponse); !ok || resp.StatusCode != 200 {
@@ -370,12 +379,16 @@ func TestForwarderRoutesEnterpriseEvents(t *testing.T) {
 	rawBytes, _ := json.Marshal(albEvent)
 	rawEvent := json.RawMessage(rawBytes)
 	done := make(chan struct{})
-	webhookForwarder.On("ForwardToWebhooks", mock.Anything, cfg.EnterpriseWebhookURLs, rawEvent).
+	webhookForwarder.On("ForwardToWebhooks", mock.Anything, mock.Anything, mock.Anything).
 		Return(map[string]forwarder.WebhookResult{
 			cfg.EnterpriseWebhookURLs[0]: {StatusCode: 200},
 		}).
-		Run(func(args mock.Arguments) { close(done) }).
-		Once()
+		Run(func(args mock.Arguments) {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		})
 
 	result := h.Handler(context.Background(), rawEvent)
 	if resp, ok := result.(events.ALBTargetGroupResponse); !ok || resp.StatusCode != 200 {

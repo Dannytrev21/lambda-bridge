@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dannytrev21/lambda-bridge/internal/constants"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -53,7 +54,7 @@ func TestContextWithoutIDs(t *testing.T) {
 func TestWebhookTimeoutContext(t *testing.T) {
 	ctx := context.Background()
 
-	ctxWithTimeout, cancel := WithWebhookTimeout(ctx, DefaultWebhookTimeout)
+	ctxWithTimeout, cancel := WithWebhookTimeout(ctx, constants.DefaultWebhookTimeout)
 	defer cancel()
 
 	deadline, ok := ctxWithTimeout.Deadline()

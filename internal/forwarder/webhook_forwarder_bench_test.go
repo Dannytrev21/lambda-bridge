@@ -31,7 +31,7 @@ func BenchmarkForwardToWebhooks(b *testing.B) {
 				}
 			}()
 
-			forwarder := NewWebhookForwarder()
+			forwarder := NewWebhookForwarder(Config{})
 
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
