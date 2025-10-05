@@ -1,4 +1,5 @@
 # Binaries
+forwarder
 *.exe
 *.exe~
 *.dll
@@ -12,6 +13,10 @@ bin/
 # Output of go coverage
 *.out
 coverage.html
+coverage.txt
+
+# Lambda packages
+lambda-deployment*.zip
 
 # Go workspace
 go.work
@@ -22,6 +27,12 @@ vendor/
 
 # Air tmp directory
 tmp/
+temp/
+
+# Backup files
+*.backup
+go.mod.backup
+go.sum.backup
 
 # Environment files
 .env
