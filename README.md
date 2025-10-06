@@ -61,15 +61,13 @@ Lambda Bridge solves these challenges by leveraging serverless architecture with
 
 ```mermaid
 graph TB
-    subgraph "Event Sources"
-        ALB[Application Load Balancer]
+    subgraph "GitHub Webhook Orchestrator"
         SNS_IN[SNS Event]
+        ALB[Application Load Balancer]
     end
 
-    subgraph "AWS Lambda - Lambda Bridge"
-        LAMBDA[Lambda Runtime]
+    subgraph "AWS Lambda - CodeGenie Bridge"
         HANDLER[Event Handler]
-        CONFIG[Config Loader<br/>YAML configs]
 
         subgraph "ALB Processing"
             HEALTH{Health Check?}
@@ -101,10 +99,12 @@ graph TB
     end
 
     %% Event Flow
-    ALB -->|POST /webhook| LAMBDA
-    SNS_IN -->|Event| LAMBDA
-    LAMBDA --> HANDLER
-    CONFIG -.->|Load| HANDLER
+    SNS_IN -->|Event| HANDLER
+    ALB -->|POST /webhook| HANDLER
+
+        %% SNS Flow
+    HANDLER -->|SNS Event| SNS_FWD
+    SNS_FWD --> SNS_OUT
 
     %% ALB Flow
     HANDLER -->|ALB Event| HEALTH
@@ -112,7 +112,6 @@ graph TB
     HEALTH -->|No| ROUTER
     ROUTER -->|x-dcp-destination-host| ASYNC
     ROUTER -->|x-github-enterprise-host| ASYNC
-    ROUTER -->|default| ASYNC
     ASYNC -->|Enqueue Job| QUEUE
     ASYNC -.->|Return 200 OK| ALB
 
@@ -132,12 +131,8 @@ graph TB
     HTTP_CLIENT -->|Concurrent| WH_ENT
     HTTP_CLIENT -->|Concurrent| WH_DEF
 
-    %% SNS Flow
-    HANDLER -->|SNS Event| SNS_FWD
-    SNS_FWD --> SNS_OUT
-    SNS_FWD -.->|Error triggers<br/>Lambda retry| SNS_IN
 
-    style LAMBDA fill:#FF9900
+
     style QUEUE fill:#4A90E2
     style WH_FWD fill:#7B68EE
     style SNS_FWD fill:#7B68EE
@@ -228,7 +223,7 @@ Lambda Bridge uses environment-specific YAML configuration files located in `con
 
 ### Configuration Files
 
-Example `configs/config.prod.yml`:
+Example `configs/config-prod.yml`:
 
 ```yaml
 sns_topic_arn: "arn:aws:sns:us-east-1:123456789012:lambda-bridge-prod"
@@ -331,9 +326,9 @@ lambda-bridge/
 │   ├── forwarder/      # SNS and webhook forwarding logic
 │   └── handler/        # Lambda event handling
 ├── configs/             # Environment configurations
-│   ├── config.dev.yml
-│   ├── config.qa.yml
-│   └── config.prod.yml
+│   ├── config-dev.yml
+│   ├── config-qa.yml
+│   └── config-prod.yml
 ├── test/                # Integration tests
 ├── features/            # BDD test scenarios
 └── scripts/             # Build and deployment scripts

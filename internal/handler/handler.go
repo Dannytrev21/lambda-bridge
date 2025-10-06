@@ -216,7 +216,7 @@ func (h *Handler) isHealthCheck(event *events.ALBTargetGroupRequest) bool {
 
 	// Check for health check paths
 	path := strings.ToLower(event.Path)
-	return path == "/health" || path == "/healthz" || path == "/ping"
+	return path == "/health" || path == "/status" || path == "/ping"
 }
 
 // selectWebhookURLs determines which webhook URLs to use based on headers

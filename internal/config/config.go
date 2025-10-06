@@ -29,7 +29,7 @@ func Load(environment string) (*Config, error) {
 	}
 
 	// Load base config from embedded files
-	filename := fmt.Sprintf("configs/config.%s.yml", environment)
+	filename := fmt.Sprintf("configs/config-%s.yml", environment)
 	data, err := configFiles.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file %s: %w", filename, err)

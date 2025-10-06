@@ -1,4 +1,4 @@
-package features
+package acceptance
 
 import (
 	"os"
@@ -10,7 +10,7 @@ import (
 func TestFeatures(t *testing.T) {
 	opts := godog.Options{
 		Format:   "pretty",
-		Paths:    []string{"."},
+		Paths:    []string{"features"},
 		TestingT: t,
 	}
 
@@ -28,7 +28,7 @@ func TestFeatures(t *testing.T) {
 func TestMain(m *testing.M) {
 	opts := godog.Options{
 		Format: getFormatFromEnv(),
-		Paths:  []string{"."},
+		Paths:  []string{"features"},
 	}
 
 	status := godog.TestSuite{
