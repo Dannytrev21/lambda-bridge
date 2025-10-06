@@ -1,5 +1,4 @@
 # Binaries
-forwarder
 *.exe
 *.exe~
 *.dll

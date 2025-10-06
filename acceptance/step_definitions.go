@@ -19,22 +19,32 @@ import (
 )
 
 // TestContext holds the state for BDD tests
+// Thread-safety: This struct is accessed by multiple goroutines during concurrent tests.
+// All shared state is protected by appropriate mutexes:
+//   - requestMutex protects: lastALBEvent, lastResponse, responseTime, requestStartTime
+//   - webhookMutex protects: webhookRequests, webhookBodies, webhookHeaders, attemptTimes
+//   - serverMutex protects: webhookServers
 type TestContext struct {
 	// Configuration
-	config *config.Config
+	config  *config.Config
 	handler *handler.Handler
 
 	// Test servers
+	// Protected by serverMutex
 	webhookServers map[string]*httptest.Server
 	serverMutex    sync.Mutex
 
 	// Request/Response tracking
-	lastALBEvent    events.ALBTargetGroupRequest
-	lastResponse    interface{}
-	responseTime    time.Duration
+	// Protected by requestMutex - these fields represent the "current" request/response
+	// In concurrent tests, access is serialized via the mutex
+	lastALBEvent     events.ALBTargetGroupRequest
+	lastResponse     interface{}
+	responseTime     time.Duration
 	requestStartTime time.Time
+	requestMutex     sync.Mutex
 
 	// Webhook tracking
+	// Protected by webhookMutex - tracks all webhook requests received
 	webhookRequests map[string][]*http.Request
 	webhookBodies   map[string][]string
 	webhookHeaders  map[string][]http.Header
@@ -42,9 +52,11 @@ type TestContext struct {
 	webhookMutex    sync.Mutex
 
 	// Timing tracking
+	// Protected by webhookMutex
 	attemptTimes map[string][]time.Time
 
 	// Test configuration
+	// These fields are set once during initialization and not modified during tests
 	maxRetries   int
 	debugEnabled bool
 	numWorkers   int
@@ -371,6 +383,9 @@ func (tc *TestContext) iReceiveAnALBEvent() error {
 }
 
 func (tc *TestContext) iReceiveAnALBEventWithPayload(payload string) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	tc.lastALBEvent = events.ALBTargetGroupRequest{
 		RequestContext: events.ALBTargetGroupRequestContext{
 			ELB: events.ELBContext{
@@ -386,10 +401,13 @@ func (tc *TestContext) iReceiveAnALBEventWithPayload(payload string) error {
 		IsBase64Encoded: false,
 	}
 
-	return tc.handleALBEvent()
+	return tc.handleALBEventLocked()
 }
 
 func (tc *TestContext) iReceiveAnALBEventWithHeader(headerName, headerValue string) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	tc.lastALBEvent = events.ALBTargetGroupRequest{
 		RequestContext: events.ALBTargetGroupRequestContext{
 			ELB: events.ELBContext{
@@ -403,10 +421,13 @@ func (tc *TestContext) iReceiveAnALBEventWithHeader(headerName, headerValue stri
 		Body: `{"test":"data"}`,
 	}
 
-	return tc.handleALBEvent()
+	return tc.handleALBEventLocked()
 }
 
 func (tc *TestContext) iReceiveAnALBEventToPath(path string) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	tc.lastALBEvent = events.ALBTargetGroupRequest{
 		RequestContext: events.ALBTargetGroupRequestContext{
 			ELB: events.ELBContext{
@@ -418,9 +439,12 @@ func (tc *TestContext) iReceiveAnALBEventToPath(path string) error {
 		Body: `{"test":"data"}`,
 	}
 
-	return tc.handleALBEvent()
+	return tc.handleALBEventLocked()
 }
 
+// iReceiveConcurrentALBEvents sends n ALB events concurrently
+// Note: Due to shared test context state (lastALBEvent, lastResponse), the test infrastructure
+// serializes event processing via requestMutex, but the handler itself processes them concurrently
 func (tc *TestContext) iReceiveConcurrentALBEvents(n int) error {
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
@@ -435,6 +459,9 @@ func (tc *TestContext) iReceiveConcurrentALBEvents(n int) error {
 }
 
 func (tc *TestContext) theRequestHasHeader(headerName, headerValue string) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	if tc.lastALBEvent.Headers == nil {
 		tc.lastALBEvent.Headers = make(map[string]string)
 	}
@@ -443,6 +470,9 @@ func (tc *TestContext) theRequestHasHeader(headerName, headerValue string) error
 }
 
 func (tc *TestContext) theLambdaShouldReturnStatusCode(expectedStatus int) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	if albResp, ok := tc.lastResponse.(events.ALBTargetGroupResponse); ok {
 		if albResp.StatusCode != expectedStatus {
 			return fmt.Errorf("expected status %d, got %d", expectedStatus, albResp.StatusCode)
@@ -457,6 +487,9 @@ func (tc *TestContext) theLambdaShouldReturnStatusCodeImmediately(expectedStatus
 }
 
 func (tc *TestContext) theLambdaShouldReturnWithinMilliseconds(maxMillis int) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	if tc.responseTime > time.Duration(maxMillis)*time.Millisecond {
 		return fmt.Errorf("response took %v, expected < %dms", tc.responseTime, maxMillis)
 	}
@@ -464,6 +497,9 @@ func (tc *TestContext) theLambdaShouldReturnWithinMilliseconds(maxMillis int) er
 }
 
 func (tc *TestContext) theResponseBodyShouldContain(expectedContent string) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	if albResp, ok := tc.lastResponse.(events.ALBTargetGroupResponse); ok {
 		if !strings.Contains(albResp.Body, expectedContent) {
 			return fmt.Errorf("response body '%s' does not contain '%s'", albResp.Body, expectedContent)
@@ -474,6 +510,9 @@ func (tc *TestContext) theResponseBodyShouldContain(expectedContent string) erro
 }
 
 func (tc *TestContext) theResponseBodyShouldBe(expectedBody string) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	if albResp, ok := tc.lastResponse.(events.ALBTargetGroupResponse); ok {
 		if albResp.Body != expectedBody {
 			return fmt.Errorf("expected body '%s', got '%s'", expectedBody, albResp.Body)
@@ -608,6 +647,9 @@ func (tc *TestContext) theNamedWebhookShouldNOTReceiveAnyEvent(routeName string)
 }
 
 func (tc *TestContext) allLambdaInvocationsShouldReturnWithinMilliseconds(maxMillis int) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	if tc.responseTime > time.Duration(maxMillis)*time.Millisecond {
 		return fmt.Errorf("response took %v, expected < %dms", tc.responseTime, maxMillis)
 	}
@@ -651,6 +693,9 @@ func (tc *TestContext) iReceiveAnALBEventWithNoSpecialHeaders() error {
 }
 
 func (tc *TestContext) theLambdaShouldReturnResponse(responseType string) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	// For now, just check that we got a response
 	if tc.lastResponse == nil {
 		return fmt.Errorf("expected response of type %s, but got no response", responseType)
@@ -659,6 +704,9 @@ func (tc *TestContext) theLambdaShouldReturnResponse(responseType string) error 
 }
 
 func (tc *TestContext) theLambdaShouldReturnStatus(statusText string) error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+
 	// Simplified - just check we have a response
 	if tc.lastResponse == nil {
 		return fmt.Errorf("expected status %s, but got no response", statusText)
@@ -739,6 +787,13 @@ func (tc *TestContext) recordWebhookRequest(serverName string, r *http.Request) 
 }
 
 func (tc *TestContext) handleALBEvent() error {
+	tc.requestMutex.Lock()
+	defer tc.requestMutex.Unlock()
+	return tc.handleALBEventLocked()
+}
+
+// handleALBEventLocked handles ALB event - must be called with requestMutex held
+func (tc *TestContext) handleALBEventLocked() error {
 	// Ensure handler is initialized
 	if tc.handler == nil {
 		tc.updateConfig()
