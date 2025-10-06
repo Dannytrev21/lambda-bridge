@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +16,17 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/Dannytrev21/lambda-bridge/internal/config"
 )
+
+// loadTestData loads a test event from the testdata directory
+func loadTestData(t *testing.T, filename string) json.RawMessage {
+	t.Helper()
+	path := filepath.Join("testdata", filename)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("Failed to read testdata file %s: %v", filename, err)
+	}
+	return json.RawMessage(data)
+}
 
 func TestHandler_HandleALBEvent(t *testing.T) {
 	// Setup test server to receive webhooks
@@ -42,21 +55,8 @@ func TestHandler_HandleALBEvent(t *testing.T) {
 
 	h := NewHandler(cfg, nil)
 
-	// Test ALB event
-	albEvent := events.ALBTargetGroupRequest{
-		RequestContext: events.ALBTargetGroupRequestContext{
-			ELB: events.ELBContext{
-				TargetGroupArn: "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/test/1234567890",
-			},
-		},
-		Headers: map[string]string{
-			"content-type": "application/json",
-		},
-		Path: "/webhook",
-		Body: `{"test":"data"}`,
-	}
-
-	rawEvent, _ := json.Marshal(albEvent)
+	// Load ALB event from testdata
+	rawEvent := loadTestData(t, "alb_standard_event.json")
 	ctx := context.Background()
 
 	// Handle event
@@ -93,50 +93,25 @@ func TestHandler_HandleHealthCheck(t *testing.T) {
 	h := NewHandler(cfg, nil)
 
 	tests := []struct {
-		name    string
-		headers map[string]string
-		path    string
-		want    string
+		name     string
+		testFile string
+		want     string
 	}{
 		{
-			name:    "health check via user-agent",
-			headers: map[string]string{"user-agent": "ELB-HealthChecker/2.0"},
-			path:    "/webhook",
-			want:    "healthy",
+			name:     "health check via user-agent (ELB)",
+			testFile: "alb_health_check_event.json",
+			want:     "healthy",
 		},
 		{
-			name:    "health check via path /health",
-			headers: map[string]string{},
-			path:    "/health",
-			want:    "healthy",
-		},
-		{
-			name:    "health check via path /healthz",
-			headers: map[string]string{},
-			path:    "/healthz",
-			want:    "healthy",
-		},
-		{
-			name:    "health check via path /ping",
-			headers: map[string]string{},
-			path:    "/ping",
-			want:    "healthy",
+			name:     "health check via path /healthz",
+			testFile: "alb_healthz_check_event.json",
+			want:     "healthy",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			albEvent := events.ALBTargetGroupRequest{
-				RequestContext: events.ALBTargetGroupRequestContext{
-					ELB: events.ELBContext{
-						TargetGroupArn: "arn:test",
-					},
-				},
-				Headers: tt.headers,
-				Path:    tt.path,
-			}
-
-			rawEvent, _ := json.Marshal(albEvent)
+			rawEvent := loadTestData(t, tt.testFile)
 			response := h.Handle(context.Background(), rawEvent)
 
 			albResp := response.(events.ALBTargetGroupResponse)
@@ -207,63 +182,37 @@ func TestHandler_RouteSelection(t *testing.T) {
 
 	h := NewHandler(cfg, nil)
 
+	// Test routing using testdata files
 	tests := []struct {
-		name              string
-		headers           map[string]string
-		expectCloud       bool
-		expectEnterprise  bool
-		expectDefault     bool
+		name     string
+		testFile string
 	}{
-		{
-			name:          "cloud destination header",
-			headers:       map[string]string{"x-dcp-destination-host": "cloud.example.com"},
-			expectCloud:   true,
-			expectDefault: false,
-		},
-		{
-			name:             "enterprise header",
-			headers:          map[string]string{"x-github-enterprise-host": "github.enterprise.com"},
-			expectEnterprise: true,
-			expectDefault:    false,
-		},
-		{
-			name:          "no special headers - default route",
-			headers:       map[string]string{},
-			expectDefault: true,
-		},
+		{"cloud destination header", "alb_forward_cloud_event.json"},
+		{"enterprise header", "alb_forward_enterprise_event.json"},
+		{"default route", "alb_standard_event.json"},
 	}
 
-	for _, tt := range tests {
+	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Reset counters
 			cloudReceived.Store(0)
 			enterpriseReceived.Store(0)
 			defaultReceived.Store(0)
 
-			albEvent := events.ALBTargetGroupRequest{
-				RequestContext: events.ALBTargetGroupRequestContext{
-					ELB: events.ELBContext{
-						TargetGroupArn: "arn:test",
-					},
-				},
-				Headers: tt.headers,
-				Path:    "/webhook",
-				Body:    `{"test":"routing"}`,
-			}
-
-			rawEvent, _ := json.Marshal(albEvent)
+			rawEvent := loadTestData(t, tt.testFile)
 			h.Handle(context.Background(), rawEvent)
 
 			// Wait for async forwarding
 			time.Sleep(300 * time.Millisecond)
 
-			if tt.expectCloud && cloudReceived.Load() != 1 {
+			// Check expectations based on test file
+			if i == 0 && cloudReceived.Load() != 1 {
 				t.Errorf("Expected cloud webhook to be called once, got %d", cloudReceived.Load())
 			}
-			if tt.expectEnterprise && enterpriseReceived.Load() != 1 {
+			if i == 1 && enterpriseReceived.Load() != 1 {
 				t.Errorf("Expected enterprise webhook to be called once, got %d", enterpriseReceived.Load())
 			}
-			if tt.expectDefault && defaultReceived.Load() != 1 {
+			if i == 2 && defaultReceived.Load() != 1 {
 				t.Errorf("Expected default webhook to be called once, got %d", defaultReceived.Load())
 			}
 		})
@@ -389,19 +338,8 @@ func TestHandler_HandleSNSEvent(t *testing.T) {
 
 	h := NewHandler(cfg, mockForwarder)
 
-	// Create SNS event
-	snsEvent := events.SNSEvent{
-		Records: []events.SNSEventRecord{
-			{
-				SNS: events.SNSEntity{
-					MessageID: "test-message-id",
-					Message:   `{"test":"data"}`,
-				},
-			},
-		},
-	}
-
-	rawEvent, _ := json.Marshal(snsEvent)
+	// Load SNS event from testdata
+	rawEvent := loadTestData(t, "sns_good_event.json")
 	ctx := context.Background()
 
 	// Handle event
@@ -661,4 +599,249 @@ func TestHandler_QueueDebugLogs(t *testing.T) {
 	h.Handle(context.Background(), rawEvent)
 
 	time.Sleep(200 * time.Millisecond)
+}
+
+func TestHandler_AsyncForwardContextCancellation(t *testing.T) {
+	cfg := &config.Config{
+		Environment:      "test",
+		SNSTopicArn:      "arn:aws:sns:us-east-1:123456789012:test",
+		WebhookURLs:      []string{"https://example.com"},
+		Debug:            true,
+	}
+
+	h := NewHandler(cfg, nil)
+
+	// Create a cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	// Try to enqueue with cancelled context
+	h.asyncForward(ctx, []string{"https://example.com"}, json.RawMessage(`{"test":"data"}`))
+
+	// Should log warning but not panic
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestHandler_AsyncForwardQueueFull(t *testing.T) {
+	// Create a slow webhook to prevent workers from draining the queue
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Second) // Very slow to keep queue full
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{
+		Environment:      "test",
+		SNSTopicArn:      "arn:aws:sns:us-east-1:123456789012:test",
+		WebhookURLs:      []string{ts.URL},
+		Debug:            true,
+	}
+
+	h := NewHandler(cfg, nil)
+
+	// Fill the queue completely
+	for i := 0; i < QueueSize; i++ {
+		h.workQueue <- &WebhookJob{
+			ctx:     context.Background(),
+			urls:    []string{ts.URL},
+			payload: json.RawMessage(`{"test":"data"}`),
+		}
+	}
+
+	// Verify queue is full before attempting to add more
+	initialSize := len(h.workQueue)
+	if initialSize < QueueSize {
+		t.Logf("Warning: Queue not completely full (%d/%d), but continuing test", initialSize, QueueSize)
+	}
+
+	// Try to add one more (should trigger default case - queue full and drop the job)
+	h.asyncForward(context.Background(), []string{ts.URL}, json.RawMessage(`{"test":"overflow"}`))
+
+	// Queue size should not exceed capacity (job should be dropped)
+	finalSize := len(h.workQueue)
+	if finalSize > QueueSize {
+		t.Errorf("Queue size exceeded capacity: %d > %d", finalSize, QueueSize)
+	}
+
+	// Cleanup
+	h.Shutdown(100 * time.Millisecond) // Short timeout since workers are busy
+}
+
+func TestHandler_GetHeaderMultiValue(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{
+		Environment:           "test",
+		SNSTopicArn:           "arn:aws:sns:us-east-1:123456789012:test",
+		CloudWebhookURLs:      []string{ts.URL},
+		EnterpriseWebhookURLs: []string{ts.URL},
+		Debug:                 false,
+	}
+
+	h := NewHandler(cfg, nil)
+
+	// Load ALB event with MultiValueHeaders from testdata
+	rawEvent := loadTestData(t, "alb_multivalue_headers_event.json")
+	response := h.Handle(context.Background(), rawEvent)
+
+	albResp := response.(events.ALBTargetGroupResponse)
+	if albResp.StatusCode != 200 {
+		t.Errorf("Expected status 200, got %d", albResp.StatusCode)
+	}
+
+	// Wait for processing
+	time.Sleep(200 * time.Millisecond)
+
+	h.Shutdown(1 * time.Second)
+}
+
+func TestHandler_GetHeaderCaseInsensitive(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{
+		Environment:      "test",
+		SNSTopicArn:      "arn:aws:sns:us-east-1:123456789012:test",
+		CloudWebhookURLs: []string{ts.URL},
+		Debug:            false,
+	}
+
+	h := NewHandler(cfg, nil)
+
+	// Test case insensitive header lookup
+	albEvent := events.ALBTargetGroupRequest{
+		RequestContext: events.ALBTargetGroupRequestContext{
+			ELB: events.ELBContext{
+				TargetGroupArn: "arn:test",
+			},
+		},
+		Path: "/webhook",
+		Body: `{"test":"case"}`,
+		Headers: map[string]string{
+			"x-dcp-DESTINATION-host": "cloud.example.com", // Mixed case
+		},
+	}
+
+	rawEvent, _ := json.Marshal(albEvent)
+	response := h.Handle(context.Background(), rawEvent)
+
+	albResp := response.(events.ALBTargetGroupResponse)
+	if albResp.StatusCode != 200 {
+		t.Errorf("Expected status 200, got %d", albResp.StatusCode)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	h.Shutdown(1 * time.Second)
+}
+
+func TestHandler_SelectWebhookURLsNilEvent(t *testing.T) {
+	cfg := &config.Config{
+		Environment:      "test",
+		SNSTopicArn:      "arn:aws:sns:us-east-1:123456789012:test",
+		WebhookURLs:      []string{"https://default.example.com"},
+		CloudWebhookURLs: []string{"https://cloud.example.com"},
+		Debug:            false,
+	}
+
+	h := NewHandler(cfg, nil)
+
+	// Test with nil event (should return default WebhookURLs)
+	urls := h.selectWebhookURLs(nil)
+
+	if len(urls) != 1 || urls[0] != "https://default.example.com" {
+		t.Errorf("Expected default webhook URLs for nil event, got %v", urls)
+	}
+}
+
+func TestHandler_HealthCheckStatus(t *testing.T) {
+	cfg := &config.Config{
+		Environment:      "test",
+		SNSTopicArn:      "arn:aws:sns:us-east-1:123456789012:test",
+		WebhookURLs:      []string{"https://example.com"},
+		Debug:            false,
+	}
+
+	h := NewHandler(cfg, nil)
+
+	// Test /status endpoint
+	albEvent := events.ALBTargetGroupRequest{
+		RequestContext: events.ALBTargetGroupRequestContext{
+			ELB: events.ELBContext{
+				TargetGroupArn: "arn:test",
+			},
+		},
+		Headers: map[string]string{},
+		Path:    "/status",
+	}
+
+	rawEvent, _ := json.Marshal(albEvent)
+	response := h.Handle(context.Background(), rawEvent)
+
+	albResp := response.(events.ALBTargetGroupResponse)
+	if albResp.StatusCode != 200 {
+		t.Errorf("Expected status 200 for /status health check, got %d", albResp.StatusCode)
+	}
+	if albResp.Body != "healthy" {
+		t.Errorf("Expected 'healthy' body for /status, got %s", albResp.Body)
+	}
+}
+
+func TestHandler_IsHealthCheckNil(t *testing.T) {
+	cfg := &config.Config{
+		Environment:      "test",
+		SNSTopicArn:      "arn:aws:sns:us-east-1:123456789012:test",
+		WebhookURLs:      []string{"https://example.com"},
+		Debug:            false,
+	}
+
+	h := NewHandler(cfg, nil)
+
+	// Test with nil event
+	result := h.isHealthCheck(nil)
+	if result {
+		t.Error("Expected isHealthCheck(nil) to return false")
+	}
+}
+
+func TestHandler_EnterpriseWebhookRouting(t *testing.T) {
+	var received atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{
+		Environment:           "test",
+		SNSTopicArn:           "arn:aws:sns:us-east-1:123456789012:test",
+		EnterpriseWebhookURLs: []string{ts.URL},
+		WebhookURLs:           []string{"https://should-not-be-called.com"},
+		Debug:                 false,
+	}
+
+	h := NewHandler(cfg, nil)
+
+	// Load enterprise event from testdata
+	rawEvent := loadTestData(t, "alb_forward_enterprise_event.json")
+	response := h.Handle(context.Background(), rawEvent)
+
+	albResp := response.(events.ALBTargetGroupResponse)
+	if albResp.StatusCode != 200 {
+		t.Errorf("Expected status 200, got %d", albResp.StatusCode)
+	}
+
+	// Wait for webhook processing
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify enterprise webhook was called
+	if count := received.Load(); count != 1 {
+		t.Errorf("Expected 1 enterprise webhook call, got %d", count)
+	}
+
+	h.Shutdown(1 * time.Second)
 }

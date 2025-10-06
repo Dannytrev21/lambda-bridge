@@ -1,0 +1,27 @@
+{
+  "Records": [
+    {
+      "EventVersion": "1.0",
+      "EventSubscriptionArn": "arn:aws:sns:us-east-1:123456789012:lambda-bridge:12345678-1234-1234-1234-123456789012",
+      "EventSource": "aws:sns",
+      "Sns": {
+        "SignatureVersion": "1",
+        "Timestamp": "2024-01-15T12:00:00.000Z",
+        "Signature": "EXAMPLE",
+        "SigningCertUrl": "EXAMPLE",
+        "MessageId": "12345678-1234-1234-1234-123456789012",
+        "Message": "{\"type\":\"webhook\",\"payload\":{\"repository\":\"test-repo\",\"event\":\"push\",\"ref\":\"refs/heads/main\"}}",
+        "MessageAttributes": {
+          "RequestID": {
+            "Type": "String",
+            "Value": "req-abc123def456"
+          }
+        },
+        "Type": "Notification",
+        "UnsubscribeUrl": "EXAMPLE",
+        "TopicArn": "arn:aws:sns:us-east-1:123456789012:lambda-bridge",
+        "Subject": "Lambda Bridge Event"
+      }
+    }
+  ]
+}

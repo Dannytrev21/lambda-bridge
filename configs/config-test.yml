@@ -1,6 +1,0 @@
-sns_topic_arn: "arn:aws:sns:us-east-1:000000000000:lambda-bridge-test"
-debug: true
-cloud_webhook_urls:
-  - "http://localhost:8081/cloud-webhook"
-enterprise_webhook_urls:
-  - "http://localhost:8082/enterprise-webhook"

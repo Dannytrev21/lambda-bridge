@@ -71,7 +71,7 @@ func TestConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "nil config",
+			name:    "empty config missing both SNS and webhooks",
 			config:  Config{},
 			wantErr: true,
 		},
@@ -84,6 +84,17 @@ func TestConfig_Validate(t *testing.T) {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestConfig_ValidateNilPointer(t *testing.T) {
+	var cfg *Config
+	err := cfg.Validate()
+	if err == nil {
+		t.Error("Expected error for nil config pointer")
+	}
+	if err.Error() != "config is nil" {
+		t.Errorf("Expected 'config is nil' error, got %v", err)
 	}
 }
 

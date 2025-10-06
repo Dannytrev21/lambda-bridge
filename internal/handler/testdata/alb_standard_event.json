@@ -1,0 +1,21 @@
+{
+  "requestContext": {
+    "elb": {
+      "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/lambda-bridge/1234567890abcdef"
+    }
+  },
+  "httpMethod": "POST",
+  "path": "/webhook",
+  "queryStringParameters": {},
+  "headers": {
+    "accept": "*/*",
+    "content-type": "application/json",
+    "host": "lambda-bridge.example.com",
+    "user-agent": "GitHub-Hookshot/abc123",
+    "x-forwarded-for": "192.0.2.1",
+    "x-forwarded-port": "443",
+    "x-forwarded-proto": "https"
+  },
+  "body": "{\"event\":\"push\",\"repository\":\"test-repo\",\"ref\":\"refs/heads/main\",\"commits\":[{\"id\":\"abc123\",\"message\":\"Initial commit\"}]}",
+  "isBase64Encoded": false
+}
