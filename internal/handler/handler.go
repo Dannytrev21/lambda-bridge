@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Dannytrev21/lambda-bridge/internal/config"
@@ -38,6 +39,7 @@ type Handler struct {
 	config           *config.Config
 	workQueue        chan *WebhookJob
 	shutdown         chan struct{}
+	workerWg         sync.WaitGroup
 }
 
 // NewHandler creates a new Lambda handler with worker pool
@@ -51,6 +53,7 @@ func NewHandler(cfg *config.Config, snsForwarder SNSForwarder) *Handler {
 	}
 
 	// Start worker pool
+	h.workerWg.Add(MaxWorkers)
 	for i := 0; i < MaxWorkers; i++ {
 		go h.worker(i)
 	}
@@ -60,6 +63,8 @@ func NewHandler(cfg *config.Config, snsForwarder SNSForwarder) *Handler {
 
 // worker processes webhook jobs from the queue
 func (h *Handler) worker(id int) {
+	defer h.workerWg.Done()
+
 	if h.config.Debug {
 		log.Printf("[DEBUG] Worker %d started", id)
 	}
@@ -284,6 +289,21 @@ func (h *Handler) Shutdown(timeout time.Duration) error {
 		}
 
 		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Wait for all workers to finish with a separate timeout
+	// Workers may be in the middle of HTTP requests with retries, so allow enough time
+	workersDone := make(chan struct{})
+	go func() {
+		h.workerWg.Wait()
+		close(workersDone)
+	}()
+
+	select {
+	case <-workersDone:
+		log.Printf("[INFO] All workers stopped successfully")
+	case <-time.After(10 * time.Second):
+		log.Printf("[WARN] Workers did not stop within 10 seconds")
 	}
 
 	return h.webhookForwarder.Close()
