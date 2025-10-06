@@ -102,11 +102,6 @@ func TestHandler_HandleHealthCheck(t *testing.T) {
 			testFile: "alb_health_check_event.json",
 			want:     "healthy",
 		},
-		{
-			name:     "health check via path /healthz",
-			testFile: "alb_healthz_check_event.json",
-			want:     "healthy",
-		},
 	}
 
 	for _, tt := range tests {

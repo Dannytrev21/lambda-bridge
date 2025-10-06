@@ -42,7 +42,7 @@ Tests the system's ability to detect and filter ALB health checks to prevent ove
 
 **Key Scenarios**:
 - Detect health check by user agent (ELB-HealthChecker)
-- Detect health check by path (/health, /healthz, /ping)
+- Detect health check by path (/health, /status, /ping)
 - Case-insensitive health check detection
 - Regular requests should forward despite health check paths
 - Scenario outlines for various health check paths
@@ -212,7 +212,7 @@ Scenario Outline: Various health check paths
   Examples:
     | path     |
     | /health  |
-    | /healthz |
+    | /status  |
     | /ping    |
 ```
 

@@ -20,9 +20,9 @@ Feature: Health Check Filtering
     And the response body should be "healthy"
     And the webhook should NOT receive any request
 
-  Scenario: Detect health check by path /healthz
+  Scenario: Detect health check by path /status
     Given I have a webhook server listening
-    When I receive an ALB event to path "/healthz"
+    When I receive an ALB event to path "/status"
     Then the Lambda should return status code 200
     And the response body should be "healthy"
     And the webhook should NOT receive any request
@@ -57,7 +57,7 @@ Feature: Health Check Filtering
     Examples:
       | path     |
       | /health  |
-      | /healthz |
+      | /status  |
       | /ping    |
       | /HEALTH  |
       | /Health  |

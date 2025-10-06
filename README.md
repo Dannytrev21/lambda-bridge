@@ -502,7 +502,7 @@ aws logs tail /aws/lambda/lambda-bridge --follow
 ### Health Checks
 
 Lambda Bridge automatically skips ALB health check requests:
-- Paths: `/health`, `/healthz`, or `/ping`
+- Paths: `/health`, `/status`, or `/ping`
 - User-Agent containing: `elb-healthchecker` (case-insensitive)
 - Returns: 200 OK immediately without forwarding to webhooks
 

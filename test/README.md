@@ -127,7 +127,7 @@ The integration test suite validates the complete end-to-end functionality of th
 
 **What it tests**:
 - ELB health checker user-agent detection
-- Health check path detection (/health, /healthz, /ping)
+- Health check path detection (/health, /status, /ping)
 - Health check responses don't trigger webhooks
 - Regular requests do trigger webhooks
 
