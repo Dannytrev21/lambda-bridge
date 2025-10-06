@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"strings"
@@ -22,9 +23,13 @@ const (
 
 // WebhookJob represents a webhook forwarding job
 type WebhookJob struct {
-	ctx     context.Context
-	urls    []string
-	payload json.RawMessage
+	ctx         context.Context
+	urls        []string
+	payload     json.RawMessage
+	method      string
+	path        string
+	queryParams map[string]string
+	headers     map[string]string
 }
 
 // SNSForwarder interface for dependency injection
@@ -87,7 +92,7 @@ func (h *Handler) worker(id int) {
 
 			// ForwardToWebhooks spawns a goroutine per URL, ensuring isolation
 			// If one URL fails or hangs, it doesn't block others
-			h.webhookForwarder.ForwardToWebhooks(job.ctx, job.urls, job.payload)
+			h.webhookForwarder.ForwardToWebhooks(job.ctx, job.urls, job.payload, job.method, job.path, job.queryParams, job.headers)
 
 		case <-h.shutdown:
 			if h.config.Debug {
@@ -152,9 +157,20 @@ func (h *Handler) handleALBEvent(ctx context.Context, rawEvent json.RawMessage, 
 		}
 	}
 
+	// Extract forwarding information from the ALB event
+	// This includes body, headers, path, query params, and HTTP method
+	payload := h.extractPayload(albEvent)
+	method := albEvent.HTTPMethod
+	if method == "" {
+		method = "POST" // Default to POST if not specified
+	}
+	path := albEvent.Path
+	queryParams := albEvent.QueryStringParameters
+	headers := albEvent.Headers
+
 	// Forward asynchronously with semaphore limiting
 	// This ensures burst handling and rate limiting
-	go h.asyncForward(ctx, urls, rawEvent)
+	go h.asyncForward(ctx, urls, payload, method, path, queryParams, headers)
 
 	// Return immediately with 200 to prevent retry storms
 	return events.ALBTargetGroupResponse{
@@ -176,14 +192,38 @@ func (h *Handler) handleSNSEvent(ctx context.Context, rawEvent json.RawMessage) 
 	return nil
 }
 
+// extractPayload extracts the body from an ALB event
+// If the body is base64 encoded, it decodes it first
+// This ensures we forward the original payload, not the ALB event wrapper
+func (h *Handler) extractPayload(albEvent *events.ALBTargetGroupRequest) json.RawMessage {
+	body := albEvent.Body
+
+	// Decode base64 if needed
+	if albEvent.IsBase64Encoded {
+		decoded, err := base64.StdEncoding.DecodeString(body)
+		if err != nil {
+			log.Printf("[WARN] Failed to decode base64 body: %v", err)
+			// Fall back to original body
+			return json.RawMessage(body)
+		}
+		return json.RawMessage(decoded)
+	}
+
+	return json.RawMessage(body)
+}
+
 // asyncForward enqueues webhook jobs for async processing
 // The work queue provides burst smoothing by buffering incoming requests
 // Workers process jobs from the queue, providing controlled concurrency
-func (h *Handler) asyncForward(ctx context.Context, urls []string, payload json.RawMessage) {
+func (h *Handler) asyncForward(ctx context.Context, urls []string, payload json.RawMessage, method, path string, queryParams, headers map[string]string) {
 	job := &WebhookJob{
-		ctx:     ctx,
-		urls:    urls,
-		payload: payload,
+		ctx:         ctx,
+		urls:        urls,
+		payload:     payload,
+		method:      method,
+		path:        path,
+		queryParams: queryParams,
+		headers:     headers,
 	}
 
 	// Try to enqueue the job (non-blocking)

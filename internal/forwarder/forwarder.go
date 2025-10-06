@@ -10,6 +10,8 @@ import (
 	"math"
 	mathrand "math/rand"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,7 +81,7 @@ func NewWebhookForwarder() *WebhookForwarder {
 // - If one URL is slow, it doesn't block others
 // - If one URL fails, others continue
 // - Retry logic is per-URL, not shared
-func (wf *WebhookForwarder) ForwardToWebhooks(ctx context.Context, urls []string, payload json.RawMessage) {
+func (wf *WebhookForwarder) ForwardToWebhooks(ctx context.Context, urls []string, payload json.RawMessage, method, path string, queryParams, headers map[string]string) {
 	if len(urls) == 0 {
 		return
 	}
@@ -94,7 +96,7 @@ func (wf *WebhookForwarder) ForwardToWebhooks(ctx context.Context, urls []string
 		wg.Add(1)
 		go func(targetURL string) {
 			defer wg.Done()
-			wf.forwardWithRetry(ctx, targetURL, payload)
+			wf.forwardWithRetry(ctx, targetURL, payload, method, path, queryParams, headers)
 		}(url)
 	}
 
@@ -116,22 +118,38 @@ func (wf *WebhookForwarder) ForwardToWebhooks(ctx context.Context, urls []string
 
 // forwardWithRetry sends payload to a single webhook with exponential backoff retry
 // This function ensures that failures don't block other URLs
-func (wf *WebhookForwarder) forwardWithRetry(ctx context.Context, url string, payload json.RawMessage) {
+func (wf *WebhookForwarder) forwardWithRetry(ctx context.Context, targetURL string, payload json.RawMessage, method, path string, queryParams, headers map[string]string) {
 	var lastErr error
+
+	// Build the full URL with path and query parameters
+	fullURL := wf.buildURL(targetURL, path, queryParams)
 
 	for attempt := 0; attempt <= defaultMaxRetries; attempt++ {
 		// Create fresh request for each attempt
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, bytes.NewReader(payload))
 		if err != nil {
-			log.Printf("[ERROR] Failed to create request for %s: %v", url, err)
+			log.Printf("[ERROR] Failed to create request for %s: %v", fullURL, err)
 			return
 		}
 
-		// Set headers
-		req.Header.Set("Content-Type", "application/json")
+		// Copy original headers from ALB event
+		for key, value := range headers {
+			// Skip headers that should not be forwarded
+			lowerKey := strings.ToLower(key)
+			if lowerKey == "host" || lowerKey == "content-length" || strings.HasPrefix(lowerKey, "x-forwarded-") {
+				continue
+			}
+			req.Header.Set(key, value)
+		}
+
+		// Set/override Lambda Bridge specific headers
 		req.Header.Set("User-Agent", "Lambda-Bridge/1.0")
 		if reqID := RequestIDFromContext(ctx); reqID != "" {
 			req.Header.Set("X-Request-ID", reqID)
+		}
+		// Ensure Content-Type is set if not already present
+		if req.Header.Get("Content-Type") == "" {
+			req.Header.Set("Content-Type", "application/json")
 		}
 
 		// Perform the request
@@ -142,7 +160,7 @@ func (wf *WebhookForwarder) forwardWithRetry(ctx context.Context, url string, pa
 			lastErr = fmt.Errorf("network error: %w", err)
 			// Check if context was cancelled
 			if ctx.Err() != nil {
-				log.Printf("[WARN] Request cancelled for %s: %v", url, ctx.Err())
+				log.Printf("[WARN] Request cancelled for %s: %v", fullURL, ctx.Err())
 				return
 			}
 			// Continue to retry for network errors
@@ -151,13 +169,13 @@ func (wf *WebhookForwarder) forwardWithRetry(ctx context.Context, url string, pa
 
 			// Success
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				log.Printf("[INFO] Successfully forwarded to %s (status: %d)", url, resp.StatusCode)
+				log.Printf("[INFO] Successfully forwarded to %s (status: %d)", fullURL, resp.StatusCode)
 				return
 			}
 
 			// Client error - don't retry
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-				log.Printf("[WARN] Client error from %s (status: %d) - not retrying", url, resp.StatusCode)
+				log.Printf("[WARN] Client error from %s (status: %d) - not retrying", fullURL, resp.StatusCode)
 				return
 			}
 
@@ -178,12 +196,38 @@ func (wf *WebhookForwarder) forwardWithRetry(ctx context.Context, url string, pa
 		case <-time.After(delay):
 			// Continue to next retry
 		case <-ctx.Done():
-			log.Printf("[WARN] Context cancelled during retry for %s", url)
+			log.Printf("[WARN] Context cancelled during retry for %s", fullURL)
 			return
 		}
 	}
 
-	log.Printf("[ERROR] Failed to forward to %s after %d retries: %v", url, defaultMaxRetries, lastErr)
+	log.Printf("[ERROR] Failed to forward to %s after %d retries: %v", fullURL, defaultMaxRetries, lastErr)
+}
+
+// buildURL constructs the full URL by appending path and query parameters to the base URL
+func (wf *WebhookForwarder) buildURL(baseURL, path string, queryParams map[string]string) string {
+	// Parse the base URL
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		log.Printf("[WARN] Failed to parse URL %s: %v", baseURL, err)
+		return baseURL
+	}
+
+	// Append path if provided
+	if path != "" {
+		u.Path = strings.TrimSuffix(u.Path, "/") + "/" + strings.TrimPrefix(path, "/")
+	}
+
+	// Add query parameters if provided
+	if len(queryParams) > 0 {
+		q := u.Query()
+		for key, value := range queryParams {
+			q.Set(key, value)
+		}
+		u.RawQuery = q.Encode()
+	}
+
+	return u.String()
 }
 
 // calculateBackoff computes exponential backoff delay with jitter

@@ -41,7 +41,7 @@ func TestWebhookForwarder_ForwardToWebhooks(t *testing.T) {
 	ctx := context.Background()
 	urls := []string{ts1.URL, ts2.URL}
 
-	wf.ForwardToWebhooks(ctx, urls, payload)
+	wf.ForwardToWebhooks(ctx, urls, payload, "POST", "/webhook", nil, nil)
 
 	// Verify both webhooks were called
 	if count := received.Load(); count != 2 {
@@ -65,7 +65,7 @@ func TestWebhookForwarder_RetryOnServerError(t *testing.T) {
 	payload := json.RawMessage(`{"test":"data"}`)
 
 	ctx := context.Background()
-	wf.ForwardToWebhooks(ctx, []string{ts.URL}, payload)
+	wf.ForwardToWebhooks(ctx, []string{ts.URL}, payload, "POST", "/webhook", nil, nil)
 
 	// Should retry and eventually succeed
 	finalAttempts := attempts.Load()
@@ -86,7 +86,7 @@ func TestWebhookForwarder_NoRetryOnClientError(t *testing.T) {
 	payload := json.RawMessage(`{"test":"data"}`)
 
 	ctx := context.Background()
-	wf.ForwardToWebhooks(ctx, []string{ts.URL}, payload)
+	wf.ForwardToWebhooks(ctx, []string{ts.URL}, payload, "POST", "/webhook", nil, nil)
 
 	// Should not retry on client error
 	if count := attempts.Load(); count != 1 {
@@ -125,7 +125,7 @@ func TestWebhookForwarder_URLIsolation(t *testing.T) {
 	ctx := context.Background()
 	urls := []string{failServer.URL, fastServer.URL}
 
-	wf.ForwardToWebhooks(ctx, urls, payload)
+	wf.ForwardToWebhooks(ctx, urls, payload, "POST", "/webhook", nil, nil)
 
 	// Both webhooks should have been attempted (fail server gets retries)
 	// Fast server should have succeeded
@@ -156,7 +156,7 @@ func TestWebhookForwarder_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	wf.ForwardToWebhooks(ctx, []string{ts.URL}, payload)
+	wf.ForwardToWebhooks(ctx, []string{ts.URL}, payload, "POST", "/webhook", nil, nil)
 
 	// Should have attempted but cancelled before completion
 	count := attempts.Load()
@@ -172,8 +172,8 @@ func TestWebhookForwarder_EmptyURLs(t *testing.T) {
 	ctx := context.Background()
 
 	// Should not panic with empty URLs
-	wf.ForwardToWebhooks(ctx, []string{}, payload)
-	wf.ForwardToWebhooks(ctx, nil, payload)
+	wf.ForwardToWebhooks(ctx, []string{}, payload, "POST", "/webhook", nil, nil)
+	wf.ForwardToWebhooks(ctx, nil, payload, "POST", "/webhook", nil, nil)
 }
 
 func TestWebhookForwarder_Headers(t *testing.T) {
@@ -192,7 +192,7 @@ func TestWebhookForwarder_Headers(t *testing.T) {
 	ctx := context.Background()
 	ctx = WithRequestID(ctx, "test-request-123")
 
-	wf.ForwardToWebhooks(ctx, []string{ts.URL}, payload)
+	wf.ForwardToWebhooks(ctx, []string{ts.URL}, payload, "POST", "/webhook", nil, nil)
 
 	// Give it time to complete
 	time.Sleep(200 * time.Millisecond)
@@ -287,7 +287,7 @@ func BenchmarkWebhookForwarder_SingleURL(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		wf.ForwardToWebhooks(ctx, []string{ts.URL}, payload)
+		wf.ForwardToWebhooks(ctx, []string{ts.URL}, payload, "POST", "/webhook", nil, nil)
 	}
 }
 
@@ -309,7 +309,7 @@ func BenchmarkWebhookForwarder_MultipleURLs(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		wf.ForwardToWebhooks(ctx, urls, payload)
+		wf.ForwardToWebhooks(ctx, urls, payload, "POST", "/webhook", nil, nil)
 	}
 }
 
