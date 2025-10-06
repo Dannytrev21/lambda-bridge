@@ -201,14 +201,41 @@ func TestHandler_RouteSelection(t *testing.T) {
 			time.Sleep(300 * time.Millisecond)
 
 			// Check expectations based on test file
-			if i == 0 && cloudReceived.Load() != 1 {
-				t.Errorf("Expected cloud webhook to be called once, got %d", cloudReceived.Load())
+			if i == 0 {
+				// Cloud routing test
+				if cloudReceived.Load() != 1 {
+					t.Errorf("Expected cloud webhook to be called once, got %d", cloudReceived.Load())
+				}
+				if enterpriseReceived.Load() != 0 {
+					t.Errorf("Expected enterprise webhook NOT to be called, got %d", enterpriseReceived.Load())
+				}
+				if defaultReceived.Load() != 0 {
+					t.Errorf("Expected default webhook NOT to be called, got %d", defaultReceived.Load())
+				}
 			}
-			if i == 1 && enterpriseReceived.Load() != 1 {
-				t.Errorf("Expected enterprise webhook to be called once, got %d", enterpriseReceived.Load())
+			if i == 1 {
+				// Enterprise routing test
+				if cloudReceived.Load() != 0 {
+					t.Errorf("Expected cloud webhook NOT to be called, got %d", cloudReceived.Load())
+				}
+				if enterpriseReceived.Load() != 1 {
+					t.Errorf("Expected enterprise webhook to be called once, got %d", enterpriseReceived.Load())
+				}
+				if defaultReceived.Load() != 0 {
+					t.Errorf("Expected default webhook NOT to be called, got %d", defaultReceived.Load())
+				}
 			}
-			if i == 2 && defaultReceived.Load() != 1 {
-				t.Errorf("Expected default webhook to be called once, got %d", defaultReceived.Load())
+			if i == 2 {
+				// Default routing test
+				if cloudReceived.Load() != 0 {
+					t.Errorf("Expected cloud webhook NOT to be called, got %d", cloudReceived.Load())
+				}
+				if enterpriseReceived.Load() != 0 {
+					t.Errorf("Expected enterprise webhook NOT to be called, got %d", enterpriseReceived.Load())
+				}
+				if defaultReceived.Load() != 1 {
+					t.Errorf("Expected default webhook to be called once, got %d", defaultReceived.Load())
+				}
 			}
 		})
 	}
@@ -804,18 +831,27 @@ func TestHandler_IsHealthCheckNil(t *testing.T) {
 }
 
 func TestHandler_EnterpriseWebhookRouting(t *testing.T) {
-	var received atomic.Int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		received.Add(1)
+	var enterpriseReceived, defaultReceived atomic.Int32
+
+	// Enterprise webhook server
+	enterpriseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enterpriseReceived.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer ts.Close()
+	defer enterpriseServer.Close()
+
+	// Default webhook server
+	defaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defaultReceived.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer defaultServer.Close()
 
 	cfg := &config.Config{
 		Environment:           "test",
 		SNSTopicArn:           "arn:aws:sns:us-east-1:123456789012:test",
-		EnterpriseWebhookURLs: []string{ts.URL},
-		WebhookURLs:           []string{"https://should-not-be-called.com"},
+		EnterpriseWebhookURLs: []string{enterpriseServer.URL},
+		WebhookURLs:           []string{defaultServer.URL},
 		Debug:                 false,
 	}
 
@@ -834,8 +870,13 @@ func TestHandler_EnterpriseWebhookRouting(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Verify enterprise webhook was called
-	if count := received.Load(); count != 1 {
+	if count := enterpriseReceived.Load(); count != 1 {
 		t.Errorf("Expected 1 enterprise webhook call, got %d", count)
+	}
+
+	// Verify default webhook was NOT called
+	if count := defaultReceived.Load(); count != 0 {
+		t.Errorf("Expected default webhook NOT to be called, got %d calls", count)
 	}
 
 	h.Shutdown(1 * time.Second)
