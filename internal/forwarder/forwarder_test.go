@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -492,4 +493,158 @@ func TestSNSForwarder_ForwardWithLargePayload(t *testing.T) {
 // Helper function
 func stringPtr(s string) *string {
 	return &s
+}
+
+// TestWebhookForwarder_URLWithPath tests transparent forwarding
+// The webhook should receive the exact same path as the ALB received
+func TestWebhookForwarder_URLWithPath(t *testing.T) {
+	tests := []struct {
+		name         string
+		webhookURL   string // Configured webhook URL (path will be replaced)
+		albPath      string // The path from the ALB event
+		expectedPath string // The path that should be received (same as albPath)
+	}{
+		{
+			name:         "ALB path replaces webhook URL path",
+			webhookURL:   "/api/v1/webhook", // This gets replaced
+			albPath:      "/webhook",
+			expectedPath: "/webhook", // Forwarded as-is from ALB
+		},
+		{
+			name:         "webhook URL path is ignored",
+			webhookURL:   "/api/v2/hooks/github", // This gets replaced
+			albPath:      "/webhook",
+			expectedPath: "/webhook", // Forwarded as-is from ALB
+		},
+		{
+			name:         "complex ALB path forwarded as-is",
+			webhookURL:   "/hook", // This gets replaced
+			albPath:      "/api/v1/github/webhook",
+			expectedPath: "/api/v1/github/webhook", // Forwarded as-is from ALB
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var received atomic.Int32
+			var actualPath string
+			var mu sync.Mutex
+
+			// Create test server that captures the path
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				actualPath = r.URL.Path
+				mu.Unlock()
+				received.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer ts.Close()
+
+			// Configure webhook URL (path will be replaced with ALB path)
+			webhookURL := ts.URL + tt.webhookURL
+
+			wf := NewWebhookForwarder()
+			payload := json.RawMessage(`{"test":"path_test"}`)
+
+			ctx := context.Background()
+			wf.ForwardToWebhooks(ctx, []string{webhookURL}, payload, "POST", tt.albPath, nil, nil)
+
+			// Give it time to complete
+			time.Sleep(200 * time.Millisecond)
+
+			count := received.Load()
+			mu.Lock()
+			path := actualPath
+			mu.Unlock()
+
+			if count != 1 {
+				t.Errorf("Expected webhook to be called once, got %d calls", count)
+			}
+
+			if path != tt.expectedPath {
+				t.Errorf("Expected path %s, got %s (webhook should receive same path as ALB)", tt.expectedPath, path)
+			}
+		})
+	}
+}
+
+// TestWebhookForwarder_URLBuildingScenarios tests transparent forwarding
+// Webhook URL paths are ignored, ALB path is always used
+func TestWebhookForwarder_URLBuildingScenarios(t *testing.T) {
+	tests := []struct {
+		name           string
+		webhookURL     string
+		albPath        string
+		queryParams    map[string]string
+		expectedPath   string
+		expectedQuery  string
+	}{
+		{
+			name:         "webhook path ignored, ALB path used",
+			webhookURL:   "https://api.example.com/hooks/receiver",
+			albPath:      "/webhook",
+			expectedPath: "/webhook", // ALB path replaces webhook path
+		},
+		{
+			name:         "webhook without path, ALB path used",
+			webhookURL:   "https://api.example.com",
+			albPath:      "/webhook",
+			expectedPath: "/webhook", // ALB path is used
+		},
+		{
+			name:          "ALB query params forwarded",
+			webhookURL:    "https://api.example.com/hook",
+			albPath:       "/webhook",
+			queryParams:   map[string]string{"token": "abc123", "source": "alb"},
+			expectedPath:  "/webhook", // ALB path replaces webhook path
+			expectedQuery: "source=alb&token=abc123",
+		},
+		{
+			name:         "complex webhook path ignored",
+			webhookURL:   "https://api.example.com/policy-bot/api/github/hook",
+			albPath:      "/webhook",
+			expectedPath: "/webhook", // ALB path replaces complex webhook path
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var actualPath string
+			var actualQuery string
+			var mu sync.Mutex
+
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				actualPath = r.URL.Path
+				actualQuery = r.URL.RawQuery
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer ts.Close()
+
+			wf := NewWebhookForwarder()
+			payload := json.RawMessage(`{"test":"url_building"}`)
+
+			// Replace example.com with actual test server
+			webhookURL := strings.Replace(tt.webhookURL, "https://api.example.com", ts.URL, 1)
+
+			ctx := context.Background()
+			wf.ForwardToWebhooks(ctx, []string{webhookURL}, payload, "POST", tt.albPath, tt.queryParams, nil)
+
+			time.Sleep(200 * time.Millisecond)
+
+			mu.Lock()
+			path := actualPath
+			query := actualQuery
+			mu.Unlock()
+
+			if path != tt.expectedPath {
+				t.Errorf("Expected path %s, got %s (ALB path should replace webhook path)", tt.expectedPath, path)
+			}
+
+			if tt.expectedQuery != "" && query != tt.expectedQuery {
+				t.Errorf("Expected query %s, got %s", tt.expectedQuery, query)
+			}
+		})
+	}
 }

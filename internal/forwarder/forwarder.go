@@ -204,18 +204,19 @@ func (wf *WebhookForwarder) forwardWithRetry(ctx context.Context, targetURL stri
 	log.Printf("[ERROR] Failed to forward to %s after %d retries: %v", fullURL, defaultMaxRetries, lastErr)
 }
 
-// buildURL constructs the full URL by appending path and query parameters to the base URL
+// buildURL constructs the full URL using the webhook host and the ALB path
+// The ALB path replaces any path in the webhook URL to forward the request as-is
 func (wf *WebhookForwarder) buildURL(baseURL, path string, queryParams map[string]string) string {
-	// Parse the base URL
+	// Parse the webhook URL
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		log.Printf("[WARN] Failed to parse URL %s: %v", baseURL, err)
 		return baseURL
 	}
 
-	// Append path if provided
+	// Replace the path with the ALB path (forward the request path as-is)
 	if path != "" {
-		u.Path = strings.TrimSuffix(u.Path, "/") + "/" + strings.TrimPrefix(path, "/")
+		u.Path = path
 	}
 
 	// Add query parameters if provided
