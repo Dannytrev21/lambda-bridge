@@ -66,8 +66,11 @@ func TestHandler_HandleALBEvent(t *testing.T) {
 	rawEvent := loadTestData(t, "alb_standard_event.json")
 	ctx := context.Background()
 
-	// Handle event
-	response := h.Handle(ctx, rawEvent)
+    // Handle event
+    response, err := h.Handle(ctx, rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	// Verify response is ALB response with 200
 	albResp, ok := response.(events.ALBTargetGroupResponse)
@@ -138,8 +141,11 @@ func TestHandler_HandleALBEventBase64(t *testing.T) {
 	rawEvent, _ := json.Marshal(albEvent)
 	ctx := context.Background()
 
-	// Handle event
-	response := h.Handle(ctx, rawEvent)
+    // Handle event
+    response, err := h.Handle(ctx, rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	// Verify response
 	albResp, ok := response.(events.ALBTargetGroupResponse)
@@ -226,7 +232,10 @@ func TestHandler_ALBForwardingPreservesHeadersAndBody(t *testing.T) {
 		t.Fatalf("failed to marshal ALB event: %v", err)
 	}
 
-	resp := h.Handle(context.Background(), rawEvent)
+    resp, err := h.Handle(context.Background(), rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	albResp, ok := resp.(events.ALBTargetGroupResponse)
 	if !ok {
@@ -315,7 +324,10 @@ func TestHandler_HandleHealthCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rawEvent := loadTestData(t, tt.testFile)
-			response := h.Handle(context.Background(), rawEvent)
+                response, err := h.Handle(context.Background(), rawEvent)
+                if err != nil {
+                    t.Fatalf("unexpected error: %v", err)
+                }
 
 			albResp := response.(events.ALBTargetGroupResponse)
 			if albResp.StatusCode != 200 {
@@ -338,7 +350,10 @@ func TestHandler_HandleUnknownEvent(t *testing.T) {
 
 	// Send invalid JSON that doesn't match any event type
 	rawEvent := json.RawMessage(`{"unknown":"event"}`)
-	response := h.Handle(context.Background(), rawEvent)
+    response, err := h.Handle(context.Background(), rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	// Should return safe ALB response
 	albResp, ok := response.(events.ALBTargetGroupResponse)
@@ -403,7 +418,7 @@ func TestHandler_RouteSelection(t *testing.T) {
 			defaultReceived.Store(0)
 
 			rawEvent := loadTestData(t, tt.testFile)
-			h.Handle(context.Background(), rawEvent)
+    _, _ = h.Handle(context.Background(), rawEvent)
 
 			// Wait for async forwarding
 			time.Sleep(300 * time.Millisecond)
@@ -483,8 +498,8 @@ func TestHandler_BurstHandling(t *testing.T) {
 			Body: `{"burst":"test"}`,
 		}
 
-		rawEvent, _ := json.Marshal(albEvent)
-		h.Handle(ctx, rawEvent)
+        rawEvent, _ := json.Marshal(albEvent)
+        _, _ = h.Handle(ctx, rawEvent)
 	}
 
 	// Wait for queue to be processed
@@ -532,8 +547,8 @@ func TestHandler_QueueOverflow(t *testing.T) {
 			Body: `{"overflow":"test"}`,
 		}
 
-		rawEvent, _ := json.Marshal(albEvent)
-		h.Handle(ctx, rawEvent)
+        rawEvent, _ := json.Marshal(albEvent)
+        _, _ = h.Handle(ctx, rawEvent)
 	}
 
 	// Wait for processing
@@ -572,13 +587,16 @@ func TestHandler_HandleSNSEvent(t *testing.T) {
 	rawEvent := loadTestData(t, "sns_good_event.json")
 	ctx := context.Background()
 
-	// Handle event
-	response := h.Handle(ctx, rawEvent)
+    // Handle event
+    response, err := h.Handle(ctx, rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
-	// SNS event should return nil on success
-	if response != nil {
-		t.Errorf("Expected nil response for successful SNS event, got %v", response)
-	}
+    // SNS event should return nil response on success
+    if response != nil {
+        t.Errorf("Expected nil response for successful SNS event, got %v", response)
+    }
 }
 
 func TestHandler_HandleSNSEventError(t *testing.T) {
@@ -613,13 +631,16 @@ func TestHandler_HandleSNSEventError(t *testing.T) {
 	rawEvent, _ := json.Marshal(snsEvent)
 	ctx := context.Background()
 
-	// Handle event
-	response := h.Handle(ctx, rawEvent)
+    // Handle event
+    response, err := h.Handle(ctx, rawEvent)
 
-	// SNS event should return the error
-	if response != expectedError {
-		t.Errorf("Expected error response for failing SNS event, got %v", response)
-	}
+    // SNS event should return the error
+    if err != expectedError {
+        t.Errorf("Expected error %v, got %v", expectedError, err)
+    }
+    if response != nil {
+        t.Errorf("Expected nil response when SNS event fails, got %v", response)
+    }
 }
 
 func TestHandler_Shutdown(t *testing.T) {
@@ -715,8 +736,8 @@ func TestHandler_WorkerWithDebug(t *testing.T) {
 		Body: `{"debug":"test"}`,
 	}
 
-	rawEvent, _ := json.Marshal(albEvent)
-	h.Handle(context.Background(), rawEvent)
+    rawEvent, _ := json.Marshal(albEvent)
+    _, _ = h.Handle(context.Background(), rawEvent)
 
 	// Wait for processing
 	time.Sleep(500 * time.Millisecond)
@@ -760,7 +781,10 @@ func TestHandler_NoWebhookURLs(t *testing.T) {
 	}
 
 	rawEvent, _ := json.Marshal(albEvent)
-	response := h.Handle(context.Background(), rawEvent)
+    response, err := h.Handle(context.Background(), rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	albResp, ok := response.(events.ALBTargetGroupResponse)
 	if !ok {
@@ -788,7 +812,10 @@ func TestHandler_HandleDebugMode(t *testing.T) {
 
 	// Test with unknown event (triggers debug log)
 	rawEvent := json.RawMessage(`{"unknown":"event"}`)
-	response := h.Handle(context.Background(), rawEvent)
+    response, err := h.Handle(context.Background(), rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	albResp, ok := response.(events.ALBTargetGroupResponse)
 	if !ok {
@@ -826,7 +853,7 @@ func TestHandler_QueueDebugLogs(t *testing.T) {
 	}
 
 	rawEvent, _ := json.Marshal(albEvent)
-	h.Handle(context.Background(), rawEvent)
+    _, _ = h.Handle(context.Background(), rawEvent)
 
 	time.Sleep(200 * time.Millisecond)
 }
@@ -915,7 +942,10 @@ func TestHandler_GetHeaderMultiValue(t *testing.T) {
 
 	// Load ALB event with MultiValueHeaders from testdata
 	rawEvent := loadTestData(t, "alb_multivalue_headers_event.json")
-	response := h.Handle(context.Background(), rawEvent)
+    response, err := h.Handle(context.Background(), rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	albResp := response.(events.ALBTargetGroupResponse)
 	if albResp.StatusCode != 200 {
@@ -958,7 +988,10 @@ func TestHandler_GetHeaderCaseInsensitive(t *testing.T) {
 	}
 
 	rawEvent, _ := json.Marshal(albEvent)
-	response := h.Handle(context.Background(), rawEvent)
+    response, err := h.Handle(context.Background(), rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	albResp := response.(events.ALBTargetGroupResponse)
 	if albResp.StatusCode != 200 {
@@ -1010,7 +1043,10 @@ func TestHandler_HealthCheckStatus(t *testing.T) {
 	}
 
 	rawEvent, _ := json.Marshal(albEvent)
-	response := h.Handle(context.Background(), rawEvent)
+    response, err := h.Handle(context.Background(), rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	albResp := response.(events.ALBTargetGroupResponse)
 	if albResp.StatusCode != 200 {
@@ -1067,7 +1103,10 @@ func TestHandler_EnterpriseWebhookRouting(t *testing.T) {
 
 	// Load enterprise event from testdata
 	rawEvent := loadTestData(t, "alb_forward_enterprise_event.json")
-	response := h.Handle(context.Background(), rawEvent)
+    response, err := h.Handle(context.Background(), rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	albResp := response.(events.ALBTargetGroupResponse)
 	if albResp.StatusCode != 200 {
@@ -1158,7 +1197,10 @@ func TestHandler_ForwardMetadata(t *testing.T) {
 	ctx := context.Background()
 
 	// Handle event
-	response := h.Handle(ctx, rawEvent)
+    response, err := h.Handle(ctx, rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	// Verify response
 	albResp, ok := response.(events.ALBTargetGroupResponse)
@@ -1226,4 +1268,202 @@ func TestHandler_ForwardMetadata(t *testing.T) {
 	}
 
 	h.Shutdown(1 * time.Second)
+}
+
+func TestHandler_ContextIsolation(t *testing.T) {
+	// Track webhook calls
+	var received atomic.Int32
+	var errors atomic.Int32
+
+	// Channel to signal when request is received
+	requestStarted := make(chan struct{}, 1)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Signal that request started
+		select {
+		case requestStarted <- struct{}{}:
+		default:
+		}
+
+		// Check if context is cancelled
+		select {
+		case <-r.Context().Done():
+			errors.Add(1)
+			t.Log("ERROR: Webhook request context was cancelled")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		default:
+			// Context not cancelled, proceed normally
+		}
+
+		// Simulate some processing time
+		time.Sleep(100 * time.Millisecond)
+
+		// Check again after processing
+		select {
+		case <-r.Context().Done():
+			errors.Add(1)
+			t.Log("ERROR: Webhook request context was cancelled during processing")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		default:
+			received.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{
+		Environment: "test",
+		SNSTopicArn: "arn:aws:sns:us-east-1:123456789012:test",
+		WebhookURLs: []string{ts.URL},
+		Debug:       true,
+	}
+
+	h := NewHandler(cfg, nil)
+	defer h.Shutdown(2 * time.Second)
+
+	// Create a context that we'll cancel immediately after Handle returns
+	// This simulates Lambda context cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+
+	albEvent := events.ALBTargetGroupRequest{
+		RequestContext: events.ALBTargetGroupRequestContext{
+			ELB: events.ELBContext{
+				TargetGroupArn: "arn:test",
+			},
+		},
+		Path: "/webhook",
+		Body: `{"test":"context_isolation"}`,
+	}
+
+	rawEvent, _ := json.Marshal(albEvent)
+
+	// Handle the event
+	response, err := h.Handle(ctx, rawEvent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify we got immediate 200 response
+	albResp, ok := response.(events.ALBTargetGroupResponse)
+	if !ok {
+		t.Fatal("Expected ALBTargetGroupResponse")
+	}
+	if albResp.StatusCode != 200 {
+		t.Errorf("Expected status 200, got %d", albResp.StatusCode)
+	}
+
+	// Cancel the context immediately after Handle returns
+	// This simulates Lambda cancelling the context after the function returns
+	cancel()
+
+	// Wait for the webhook request to start
+	select {
+	case <-requestStarted:
+		// Request started, good
+	case <-time.After(1 * time.Second):
+		t.Fatal("Webhook request did not start within 1 second")
+	}
+
+	// Wait for webhook processing to complete
+	time.Sleep(500 * time.Millisecond)
+
+	// Check results
+	if errorCount := errors.Load(); errorCount > 0 {
+		t.Errorf("Context cancellation leaked to webhook: %d errors", errorCount)
+	}
+
+	if receivedCount := received.Load(); receivedCount != 1 {
+		t.Errorf("Expected 1 successful webhook call, got %d", receivedCount)
+	}
+}
+
+func TestHandler_SimulateLambdaContextCancellation(t *testing.T) {
+	// Track successful and failed webhook calls
+	var successCount atomic.Int32
+	var cancelCount atomic.Int32
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate network delay
+		time.Sleep(200 * time.Millisecond)
+
+		// Check if the request context was cancelled
+		select {
+		case <-r.Context().Done():
+			cancelCount.Add(1)
+			t.Logf("Request cancelled: %v", r.Context().Err())
+			// Don't write response if context is cancelled
+			return
+		default:
+			successCount.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{
+		Environment: "test",
+		SNSTopicArn: "arn:aws:sns:us-east-1:123456789012:test",
+		WebhookURLs: []string{ts.URL},
+		Debug:       true,
+	}
+
+	h := NewHandler(cfg, nil)
+	defer h.Shutdown(2 * time.Second)
+
+	// Simulate multiple rapid Lambda invocations
+	for i := 0; i < 3; i++ {
+		// Create a context that simulates Lambda's request context
+		lambdaCtx, cancel := context.WithCancel(context.Background())
+
+		albEvent := events.ALBTargetGroupRequest{
+			RequestContext: events.ALBTargetGroupRequestContext{
+				ELB: events.ELBContext{
+					TargetGroupArn: "arn:test",
+				},
+			},
+			Path: "/webhook",
+			Body: fmt.Sprintf(`{"request":%d}`, i),
+		}
+
+		rawEvent, _ := json.Marshal(albEvent)
+
+		// Handle the event (simulating Lambda invocation)
+		response, err := h.Handle(lambdaCtx, rawEvent)
+		if err != nil {
+			t.Fatalf("Request %d: unexpected error: %v", i, err)
+		}
+
+		// Verify immediate response
+		if albResp, ok := response.(events.ALBTargetGroupResponse); !ok || albResp.StatusCode != 200 {
+			t.Errorf("Request %d: Expected 200 response", i)
+		}
+
+		// Cancel context immediately (simulating Lambda finishing)
+		cancel()
+
+		// Small delay between invocations
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Wait for all webhooks to complete
+	time.Sleep(1 * time.Second)
+
+	// Check results
+	success := successCount.Load()
+	cancelled := cancelCount.Load()
+
+	t.Logf("Successful webhook calls: %d", success)
+	t.Logf("Cancelled webhook calls: %d", cancelled)
+
+	// With the bug, we expect cancelled calls
+	// After the fix, all calls should succeed
+	if cancelled > 0 {
+		t.Errorf("Context cancellation affected webhook forwarding: %d calls cancelled", cancelled)
+	}
+
+	if success != 3 {
+		t.Errorf("Expected 3 successful webhook calls, got %d", success)
+	}
 }

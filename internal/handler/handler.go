@@ -104,7 +104,8 @@ func (h *Handler) worker(id int) {
 }
 
 // Handle processes Lambda events (ALB or SNS) and returns appropriate response
-func (h *Handler) Handle(ctx context.Context, rawEvent json.RawMessage) any {
+// Now returns a response and an error to align with lambda handler patterns.
+func (h *Handler) Handle(ctx context.Context, rawEvent json.RawMessage) (any, error) {
 	// Add request ID to context if not present
 	requestID := forwarder.RequestIDFromContext(ctx)
 	if requestID == "" {
@@ -118,24 +119,24 @@ func (h *Handler) Handle(ctx context.Context, rawEvent json.RawMessage) any {
 
 	// Try ALB event first (most common)
 	var albEvent events.ALBTargetGroupRequest
-	if err := json.Unmarshal(rawEvent, &albEvent); err == nil && albEvent.RequestContext.ELB.TargetGroupArn != "" {
-		return h.handleALBEvent(ctx, rawEvent, &albEvent)
-	}
+    if err := json.Unmarshal(rawEvent, &albEvent); err == nil && albEvent.RequestContext.ELB.TargetGroupArn != "" {
+        return h.handleALBEvent(ctx, rawEvent, &albEvent), nil
+    }
 
 	// Try SNS event
 	var snsEvent events.SNSEvent
-	if err := json.Unmarshal(rawEvent, &snsEvent); err == nil && len(snsEvent.Records) > 0 && snsEvent.Records[0].SNS.MessageID != "" {
-		return h.handleSNSEvent(ctx, rawEvent)
-	}
+    if err := json.Unmarshal(rawEvent, &snsEvent); err == nil && len(snsEvent.Records) > 0 && snsEvent.Records[0].SNS.MessageID != "" {
+        return nil, h.handleSNSEvent(ctx, rawEvent)
+    }
 
 	// Unknown event type - return safe ALB response
 	log.Printf("[WARN] Unknown event type, returning safe ALB response")
-	return events.ALBTargetGroupResponse{
-		StatusCode:      200,
-		Headers:         map[string]string{"Content-Type": "application/json"},
-		Body:            `{"status":"accepted"}`,
-		IsBase64Encoded: false,
-	}
+    return events.ALBTargetGroupResponse{
+        StatusCode:      200,
+        Headers:         map[string]string{"Content-Type": "application/json"},
+        Body:            `{"status":"accepted"}`,
+        IsBase64Encoded: false,
+    }, nil
 }
 
 // handleALBEvent processes ALB events
@@ -182,14 +183,14 @@ func (h *Handler) handleALBEvent(ctx context.Context, rawEvent json.RawMessage, 
 }
 
 // handleSNSEvent processes SNS events
-func (h *Handler) handleSNSEvent(ctx context.Context, rawEvent json.RawMessage) any {
-	if err := h.snsForwarder.Forward(ctx, h.config.SNSTopicArn, rawEvent); err != nil {
-		// Log the error with context
-		log.Printf("[ERROR] SNS forwarding failed: %v", err)
-		// Return the error for Lambda retry mechanism
-		return err
-	}
-	return nil
+func (h *Handler) handleSNSEvent(ctx context.Context, rawEvent json.RawMessage) error {
+    if err := h.snsForwarder.Forward(ctx, h.config.SNSTopicArn, rawEvent); err != nil {
+        // Log the error with context
+        log.Printf("[ERROR] SNS forwarding failed: %v", err)
+        // Return the error for Lambda retry mechanism
+        return err
+    }
+    return nil
 }
 
 // extractPayload extracts the body from an ALB event
@@ -216,8 +217,18 @@ func (h *Handler) extractPayload(albEvent *events.ALBTargetGroupRequest) json.Ra
 // The work queue provides burst smoothing by buffering incoming requests
 // Workers process jobs from the queue, providing controlled concurrency
 func (h *Handler) asyncForward(ctx context.Context, urls []string, payload json.RawMessage, method, path string, queryParams, headers map[string]string) {
+	// Create a new context for the webhook job that is independent of the Lambda invocation context
+	// This ensures webhook forwarding continues even after the Lambda function returns
+	// We use context.Background() to create a fresh context that won't be cancelled when Lambda returns
+	jobCtx := context.Background()
+
+	// Preserve the request ID from the original context
+	if requestID := forwarder.RequestIDFromContext(ctx); requestID != "" {
+		jobCtx = forwarder.WithRequestID(jobCtx, requestID)
+	}
+
 	job := &WebhookJob{
-		ctx:         ctx,
+		ctx:         jobCtx,  // Use the new independent context
 		urls:        urls,
 		payload:     payload,
 		method:      method,
@@ -227,6 +238,8 @@ func (h *Handler) asyncForward(ctx context.Context, urls []string, payload json.
 	}
 
 	// Try to enqueue the job (non-blocking)
+	// We don't check for context cancellation here because we want to queue the job
+	// even if the Lambda context is cancelled - the job will run with its own context
 	select {
 	case h.workQueue <- job:
 		// Job successfully queued
@@ -234,11 +247,9 @@ func (h *Handler) asyncForward(ctx context.Context, urls []string, payload json.
 			log.Printf("[DEBUG] Job queued with %d URLs (queue size: %d/%d)",
 				len(urls), len(h.workQueue), QueueSize)
 		}
-	case <-ctx.Done():
-		log.Printf("[WARN] Context cancelled before enqueuing job")
 	default:
 		// Queue is full - drop the job
-		// This rarely happens with a large queue (100 items)
+		// This rarely happens with a large queue (200 items)
 		log.Printf("[WARN] Queue full - dropping job (burst exceeded queue capacity)")
 	}
 }

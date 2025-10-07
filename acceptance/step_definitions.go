@@ -37,11 +37,12 @@ type TestContext struct {
 	// Request/Response tracking
 	// Protected by requestMutex - these fields represent the "current" request/response
 	// In concurrent tests, access is serialized via the mutex
-	lastALBEvent     events.ALBTargetGroupRequest
-	lastResponse     interface{}
-	responseTime     time.Duration
-	requestStartTime time.Time
-	requestMutex     sync.Mutex
+    lastALBEvent     events.ALBTargetGroupRequest
+    lastResponse     interface{}
+    lastErr          error
+    responseTime     time.Duration
+    requestStartTime time.Time
+    requestMutex     sync.Mutex
 
 	// Webhook tracking
 	// Protected by webhookMutex - tracks all webhook requests received
@@ -805,8 +806,8 @@ func (tc *TestContext) handleALBEventLocked() error {
 	}
 
 	tc.requestStartTime = time.Now()
-	tc.lastResponse = tc.handler.Handle(context.Background(), rawEvent)
-	tc.responseTime = time.Since(tc.requestStartTime)
+    tc.lastResponse, tc.lastErr = tc.handler.Handle(context.Background(), rawEvent)
+    tc.responseTime = time.Since(tc.requestStartTime)
 
 	return nil
 }

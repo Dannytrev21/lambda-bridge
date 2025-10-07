@@ -276,7 +276,10 @@ func TestIntegration_EndToEndALBFlow(t *testing.T) {
     handler := setupHandler(server.URL)
 
     // Send ALB event
-    response := handler.Handle(ctx, albEvent)
+    response, err := handler.Handle(ctx, albEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
     // Verify response and webhook received event
     assert.Equal(t, 200, response.StatusCode)

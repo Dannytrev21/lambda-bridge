@@ -76,8 +76,11 @@ func TestIntegration_EndToEndALBFlow(t *testing.T) {
 	rawEvent, _ := json.Marshal(albEvent)
 	ctx := context.Background()
 
-	// Execute: Handle the event
-	response := h.Handle(ctx, rawEvent)
+    // Execute: Handle the event
+    response, err := h.Handle(ctx, rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	// Verify: Lambda response is immediate
 	albResp, ok := response.(events.ALBTargetGroupResponse)
@@ -168,8 +171,11 @@ func TestIntegration_ConcurrentBurstTraffic(t *testing.T) {
 				Body: fmt.Sprintf(`{"burst_test":true,"request_id":%d}`, requestID),
 			}
 
-			rawEvent, _ := json.Marshal(albEvent)
-			response := h.Handle(context.Background(), rawEvent)
+            rawEvent, _ := json.Marshal(albEvent)
+            response, err := h.Handle(context.Background(), rawEvent)
+            if err != nil {
+                t.Fatalf("unexpected error: %v", err)
+            }
 
 			reqDuration := time.Since(reqStart)
 			mu.Lock()
@@ -313,8 +319,8 @@ func TestIntegration_MultiRouteDistribution(t *testing.T) {
 				Body:    fmt.Sprintf(`{"route_test":"%s"}`, scenario.name),
 			}
 
-			rawEvent, _ := json.Marshal(albEvent)
-			h.Handle(context.Background(), rawEvent)
+            rawEvent, _ := json.Marshal(albEvent)
+            _, _ = h.Handle(context.Background(), rawEvent)
 
 			// Wait for async processing
 			time.Sleep(500 * time.Millisecond)
@@ -386,8 +392,11 @@ func TestIntegration_FailureRecovery(t *testing.T) {
 		Body: `{"test":"failure_recovery"}`,
 	}
 
-	rawEvent, _ := json.Marshal(albEvent)
-	response := h.Handle(context.Background(), rawEvent)
+    rawEvent, _ := json.Marshal(albEvent)
+    response, err := h.Handle(context.Background(), rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	// Verify Lambda still returns 200 (non-blocking)
 	if albResp, ok := response.(events.ALBTargetGroupResponse); ok {
@@ -468,9 +477,9 @@ func TestIntegration_URLIsolation(t *testing.T) {
 		Body: `{"test":"url_isolation"}`,
 	}
 
-	rawEvent, _ := json.Marshal(albEvent)
-	startTime := time.Now()
-	h.Handle(context.Background(), rawEvent)
+    rawEvent, _ := json.Marshal(albEvent)
+    startTime := time.Now()
+    _, _ = h.Handle(context.Background(), rawEvent)
 
 	// Wait for both webhooks to complete
 	time.Sleep(3 * time.Second)
@@ -538,8 +547,11 @@ func TestIntegration_HealthCheckFiltering(t *testing.T) {
 		Path: "/webhook",
 	}
 
-	rawEvent, _ := json.Marshal(healthCheckEvent)
-	response := h.Handle(context.Background(), rawEvent)
+    rawEvent, _ := json.Marshal(healthCheckEvent)
+    response, err := h.Handle(context.Background(), rawEvent)
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
 
 	// Verify: Health check returns 200 without forwarding
 	if albResp, ok := response.(events.ALBTargetGroupResponse); ok {
@@ -569,8 +581,8 @@ func TestIntegration_HealthCheckFiltering(t *testing.T) {
 		Body: `{"test":"regular"}`,
 	}
 
-	rawEvent, _ = json.Marshal(regularEvent)
-	h.Handle(context.Background(), rawEvent)
+    rawEvent, _ = json.Marshal(regularEvent)
+    _, _ = h.Handle(context.Background(), rawEvent)
 
 	time.Sleep(500 * time.Millisecond)
 
@@ -672,7 +684,7 @@ func TestIntegration_MixedTrafficScenario(t *testing.T) {
 				}
 
 				rawEvent, _ := json.Marshal(albEvent)
-				h.Handle(context.Background(), rawEvent)
+				_, _ = h.Handle(context.Background(), rawEvent)
 
 				// Variable request rate
 				time.Sleep(time.Duration(50+requestNum%100) * time.Millisecond)
@@ -758,7 +770,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 		}
 
 		rawEvent, _ := json.Marshal(albEvent)
-		h.Handle(context.Background(), rawEvent)
+		_, _ = h.Handle(context.Background(), rawEvent)
 	}
 
 	// Allow time for async goroutines to enqueue jobs
@@ -839,8 +851,8 @@ func BenchmarkIntegration_EndToEndThroughput(b *testing.B) {
 	rawEvent, _ := json.Marshal(albEvent)
 	ctx := context.Background()
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		h.Handle(ctx, rawEvent)
-	}
+    b.ResetTimer()
+    for i := 0; i < b.N; i++ {
+        _, _ = h.Handle(ctx, rawEvent)
+    }
 }
